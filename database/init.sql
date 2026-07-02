@@ -89,9 +89,6 @@ CREATE TABLE IF NOT EXISTS lesion_segmentation_results (
     hard_exudate_detected BOOLEAN DEFAULT FALSE,
     hard_exudate_area_pct DECIMAL(5,4) DEFAULT 0.0,
     
-    soft_exudate_detected BOOLEAN DEFAULT FALSE,
-    soft_exudate_area_pct DECIMAL(5,4) DEFAULT 0.0,
-    
     dice_score DECIMAL(5,4), -- Dice score nội bộ (để đánh giá nếu có ground-truth)
     model_version VARCHAR(50) NOT NULL,
     segmented_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP

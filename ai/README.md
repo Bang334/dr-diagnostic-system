@@ -58,8 +58,7 @@ Thư mục này chứa mã nguồn phục vụ việc nghiên cứu, tiền xử
   "lesions": {
     "microaneurysm": { "detected": true, "area_pct": 0.1250 },
     "hemorrhage": { "detected": true, "area_pct": 0.8520 },
-    "hard_exudate": { "detected": false, "area_pct": 0.0000 },
-    "soft_exudate": { "detected": false, "area_pct": 0.0000 }
+    "hard_exudate": { "detected": false, "area_pct": 0.0000 }
   }
 }
 ```

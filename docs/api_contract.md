@@ -95,8 +95,7 @@ Tài liệu này định nghĩa giao thức và định dạng dữ liệu (JSON
           "lesions": {
             "microaneurysm": { "detected": true, "area_pct": 0.12 },
             "hemorrhage": { "detected": true, "area_pct": 0.45 },
-            "hard_exudate": { "detected": false, "area_pct": 0.0 },
-            "soft_exudate": { "detected": false, "area_pct": 0.0 }
+            "hard_exudate": { "detected": false, "area_pct": 0.0 }
           }
         }
       },
@@ -114,8 +113,7 @@ Tài liệu này định nghĩa giao thức và định dạng dữ liệu (JSON
           "lesions": {
             "microaneurysm": { "detected": false, "area_pct": 0.0 },
             "hemorrhage": { "detected": false, "area_pct": 0.0 },
-            "hard_exudate": { "detected": false, "area_pct": 0.0 },
-            "soft_exudate": { "detected": false, "area_pct": 0.0 }
+            "hard_exudate": { "detected": false, "area_pct": 0.0 }
           }
         }
       },

@@ -48,7 +48,6 @@ export const colors = {
   lesions: {
     microaneurysm: { label: 'Vi phình mạch (Microaneurysm)', color: '#EF4444' },
     hemorrhage: { label: 'Xuất huyết (Hemorrhage)', color: '#DC2626' },
-    hardExudate: { label: 'Rỉ dịch cứng (Hard Exudate)', color: '#F59E0B' },
-    softExudate: { label: 'Rỉ dịch mềm (Soft Exudate)', color: '#EAB308' }
+    hardExudate: { label: 'Rỉ dịch cứng (Hard Exudate)', color: '#F59E0B' }
   }
 }

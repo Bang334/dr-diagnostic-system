@@ -59,12 +59,6 @@ Tài liệu này định nghĩa giao thức và định dạng dữ liệu (JSON
       "detected": true,
       "area_pct": 0.35,
       "confidence": 0.71
-    },
-    {
-      "key": "soft_exudate",
-      "detected": false,
-      "area_pct": 0.0,
-      "confidence": null
     }
   ],
   "overlay_b64": "data:image/png;base64,iVBOR...",
@@ -73,4 +67,4 @@ Tài liệu này định nghĩa giao thức và định dạng dữ liệu (JSON
 }
 ```
 
-*Lưu ý:* Danh sách `lesions` bắt buộc phải trả về đúng 4 keys: `microaneurysm`, `hemorrhage`, `hard_exudate`, `soft_exudate` để Clinical Orchestrator phân tích và gộp đúng tổn thương cho thuật toán y khoa.
+*Lưu ý:* Danh sách `lesions` bắt buộc phải trả về đúng 3 keys: `microaneurysm`, `hemorrhage`, `hard_exudate` để Clinical Orchestrator phân tích và gộp đúng tổn thương cho thuật toán y khoa.
