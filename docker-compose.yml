@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: dr-postgres-db
+    restart: always
+    environment:
+      POSTGRES_USER: dr_user
+      POSTGRES_PASSWORD: dr_password_2026
+      POSTGRES_DB: dr_screening_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - dr-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dr_user -d dr_screening_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dr-backend-api
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://dr_user:dr_password_2026@db:5432/dr_screening_db
+      - ENV=production
+      - AI_GRADING_SERVICE_URL=http://ai-service:8001
+      - AI_SEGMENTATION_SERVICE_URL=http://ai-service:8002
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - /app/.venv
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - dr-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dr-frontend-web
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - dr-network
+
+networks:
+  dr-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+    driver: local
