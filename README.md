@@ -66,13 +66,13 @@ dr-diagnostic-system/
 
 ---
 
-## 👥 Phân Chia Nhiệm Vụ Trong Nhóm
+## 👥 Phân Chia Nhiệm Vụ Trong Nhóm (Cả 3 thành viên cùng làm Website)
 
-| Thành Viên | Vai Trò Chính | Nhiệm Vụ Chi Tiết |
-| :--- | :--- | :--- |
-| **Thành viên 1** | **AI Engineer (Grading)** | - Nghiên cứu tiền xử lý ảnh võng mạc (Green Channel, CLAHE, Ben Graham).<br>- Huấn luyện & tối ưu mô hình phân loại DR 5 mức độ (ETDRS/ICDR) sử dụng EfficientNet, ResNet, ConvNeXt.<br>- Đánh giá mô hình bằng chỉ số Quadratic Weighted Kappa. |
-| **Thành viên 2** | **AI Engineer (Segmentation)** | - Xây dựng mô hình phân đoạn tổn thương (Microaneurysm, Hemorrhage, Hard Exudate) bằng U-Net và các biến thể.<br>- Đánh giá bằng Dice Score.<br>- Nghiên cứu Semi-supervised & Few-shot Learning để tối ưu hóa kho ảnh ít nhãn. |
-| **Thành viên 3** | **Fullstack & Integrator** | - Phân tích thiết kế hệ thống, thiết kế Database PostgreSQL.<br>- Xây dựng Backend FastAPI kết nối DB, quản lý thông tin bệnh nhân, lịch hẹn, thống kê dịch tễ.<br>- Viết Module báo cáo tự động, xuất PDF kết quả khám bệnh.<br>- Xây dựng Frontend ReactJS (Giao diện bác sĩ, quản trị viên, Dashboard báo cáo). |
+| Thành Viên | Phân Vai AI / Lâm Sàng | Nhiệm Vụ AI Chi Tiết | Vai Trò Phát Triển Website Chung |
+| :--- | :--- | :--- | :--- |
+| **Thành viên 1** | **Phân loại mức độ DR (DR Grading)** | - **Nghiên cứu:** Bài toán DR Grading; Thang phân loại ICDR/ETDRS; Các mô hình (EfficientNet, ResNet, ConvNeXt); Các chỉ số đánh giá (Accuracy, Precision, Recall, F1, QWK).<br>- **Thực hành:** Thu thập dữ liệu (EyePACS, APTOS 2019); Tiền xử lý (Resize, Green Channel, CLAHE, Ben Graham); Huấn luyện mô hình phân loại 5 mức; So sánh chọn mô hình tối ưu; Đóng gói mô hình thành API. | - Tham gia thiết kế và xây dựng giao diện bác sĩ (Frontend) hiển thị mức độ phân loại bệnh và độ tin cậy AI.<br>- Tích hợp API Grading vào luồng xử lý chung của Backend. |
+| **Thành viên 2** | **Phân đoạn tổn thương (Lesion Segmentation)** | - **Nghiên cứu:** Các loại tổn thương (Microaneurysm, Hemorrhage, Hard Exudate); Các kiến trúc (U-Net, U-Net++, Attention U-Net); Chỉ số đánh giá (Dice Score, IoU).<br>- **Thực hành:** Thu thập dữ liệu (IDRiD, DDR); Tiền xử lý ảnh phục vụ segmentation; Huấn luyện mô hình phân đoạn; Sinh bản đồ tổn thương (mask) dạng overlay. | - Tham gia thiết kế và xây dựng giao diện hiển thị ảnh võng mạc (Frontend) vẽ đè bản đồ tổn thương.<br>- Tích hợp API Segmentation vào luồng xử lý chung của Backend. |
+| **Thành viên 3** | **AI Nâng Cao & Hỗ Trợ Lâm Sàng** | - **Nghiên cứu:** Kỹ thuật Semi-supervised Learning, Few-shot Learning; Tiêu chuẩn ứng dụng AI nhãn khoa tại Việt Nam; Quy trình hỗ trợ chẩn đoán lâm sàng.<br>- **Thực hành:** Thử nghiệm Semi-supervised/Few-shot; Xây dựng module tổng hợp kết quả (phân loại + phân đoạn); Sinh báo cáo tự động (mức độ DR, vùng tổn thương, khuyến nghị điều trị dựa trên hướng dẫn lâm sàng). | - Tham gia thiết kế hệ thống, kiến trúc CSDL PostgreSQL.<br>- Xây dựng Module xuất phiếu kết quả PDF, phân hệ thống kê dịch tễ (Dashboard) và quản trị hệ thống. |
 
 ---
 
