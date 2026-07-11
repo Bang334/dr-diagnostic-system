@@ -185,3 +185,11 @@ ai/weights/
 backend/app/reports/*.pdf
 clinical/reports/*.pdf
 *.pdf
+
+# Data Directories
+data/raw/*
+!data/raw/**/*.gitkeep
+data/processed/*
+!data/processed/**/*.gitkeep
+data/splits/*
+!data/splits/**/*.gitkeep
