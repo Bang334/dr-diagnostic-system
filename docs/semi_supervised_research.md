@@ -28,7 +28,7 @@ graph LR
 ```
 
 #### B. FixMatch (Consistency Regularization + Pseudo-Labeling)
-Thuật toán Semi-supervised hiện đại và hiệu quả nhất cho phân loại ảnh võng mạc:
+Một phương pháp semi-supervised phổ biến cần được so sánh thực nghiệm với supervised baseline:
 1. Áp dụng tăng cường dữ liệu nhẹ (Weak Augmentation - e.g., lật ảnh, dịch chuyển nhẹ) lên ảnh chưa gán nhãn $u$. Mô hình dự đoán nhãn giả $p$.
 2. Áp dụng tăng cường dữ liệu mạnh (Strong Augmentation - e.g., RandAugment, CLAHE cường độ cao) lên cùng ảnh $u$.
 3. Tối ưu hóa mô hình sao cho dự đoán trên ảnh tăng cường mạnh trùng khớp với nhãn giả $p$ thu được từ ảnh tăng cường nhẹ (nếu độ tin cậy vượt ngưỡng $0.95$).
@@ -40,7 +40,7 @@ Thuật toán Semi-supervised hiện đại và hiệu quả nhất cho phân lo
 Few-shot Learning (FSL) được áp dụng khi hệ thống cần chẩn đoán các tổn thương vi mô hiếm gặp trên võng mạc hoặc học nhanh từ một vài mẫu ca bệnh đặc biệt (1-shot hoặc 5-shot).
 
 ### Mạng Nguyên Mẫu (Prototypical Networks - ProtoNet)
-ProtoNet là kiến trúc FSL hiệu quả nhất dựa trên không gian nhúng (metric-based learning):
+ProtoNet là một kiến trúc FSL dựa trên không gian nhúng (metric-based learning):
 1. Sử dụng một mạng CNN (như ResNet hoặc EfficientNet làm Backbone) để chiếu ảnh võng mạc vào một không gian đặc trưng nhiều chiều.
 2. Tính toán điểm trung tâm (Prototype $c_k$) cho mỗi lớp bệnh lý bằng cách lấy trung bình cộng các vector đặc trưng của các ảnh có nhãn trong tập hỗ trợ (Support Set).
 3. Với một ảnh truy vấn mới (Query Image), tính khoảng cách Euclide từ vector đặc trưng của nó đến các Prototype $c_k$. Phân loại ảnh vào lớp có khoảng cách gần nhất.
@@ -51,6 +51,6 @@ ProtoNet là kiến trúc FSL hiệu quả nhất dựa trên không gian nhúng
 
 Để hỗ trợ thực hành, Thành viên 3 sẽ làm việc chính tại thư mục `ai/semi_supervised/` với các file đã được tạo khung sẵn:
 
-1. **[ai/semi_supervised/semi_supervised_training.py](file:///e:/HocTap/DoAnTT/dr-diagnostic-system/ai/semi_supervised/semi_supervised_training.py):** Khung code PyTorch triển khai thuật toán **Pseudo-Labeling** huấn luyện mô hình phân loại DR sử dụng tập dữ liệu ảnh chưa gán nhãn.
-2. **[ai/semi_supervised/few_shot_demo.py](file:///e:/HocTap/DoAnTT/dr-diagnostic-system/ai/semi_supervised/few_shot_demo.py):** Khung code PyTorch triển khai kiến trúc **Prototypical Networks** phân loại Few-shot ảnh võng mạc 5 lớp.
-3. **[ai/semi_supervised/README.md](file:///e:/HocTap/DoAnTT/dr-diagnostic-system/ai/semi_supervised/README.md):** Hướng dẫn chuẩn bị dữ liệu chưa gán nhãn từ môi trường bệnh viện và các siêu tham số huấn luyện bán giám sát.
+1. `ai/semi_supervised/semi_supervised_training.py`: scaffold pseudo-labeling; chưa phải kết quả thí nghiệm nếu thiếu baseline và test set.
+2. `ai/semi_supervised/few_shot_demo.py`: ProtoNet demo trên dữ liệu giả lập; không dùng accuracy demo làm metric y khoa.
+3. `ai/semi_supervised/README.md`: trạng thái, giới hạn và điều kiện đưa model vào production.

@@ -124,24 +124,26 @@ Bác sĩ nhãn khoa tải lên ảnh võng mạc của bệnh nhân và nhập c
 - **Số năm bị đái tháo đường:** Thời gian mắc bệnh càng lâu, nguy cơ xuất hiện biến chứng võng mạc càng cao.
 
 ### Bước 2: Quality Gate & Tiền Xử Lý Ảnh
-- Hệ thống kiểm tra kỹ thuật của file ảnh (Quality Gate) để loại bỏ ảnh hỏng.
-- Thực hiện tiền xử lý chuẩn y khoa: Resize $\rightarrow$ Green Channel Extraction (làm nổi bật mạch máu) $\rightarrow$ CLAHE (cân bằng tương phản cục bộ) $\rightarrow$ Ben Graham Normalization (khử nhiễu nền).
+- Thu đủ hai ảnh mỗi mắt: đĩa thị và hậu cực/hoàng điểm.
+- Hệ thống loại ảnh hỏng/quá nhỏ, xóa metadata khi tái mã hóa và gắn trạng thái
+  `ReviewRequired`; người đọc xác nhận gradability. Tiền xử lý cụ thể thuộc model
+  và phải giống quy trình đã validation, không mặc định CLAHE làm ảnh đạt chuẩn.
 
-### Bước 3: Inference Bằng Các Model Đã Tối Ưu (TV3 vận hành)
-Hệ thống sử dụng các mô hình học sâu **đã được tối ưu hóa** bởi TV3 để nhận diện ảnh:
+### Bước 3: Inference qua adapter model có quản lý phiên bản
+Hệ thống gọi model qua adapter HTTP; nếu model không sẵn sàng thì trả `503`, không sinh mock:
 1. **Model phân loại (TV1 gốc đã tối ưu):** Dự đoán cấp độ DR Grade từ 0 đến 4 cùng độ tin cậy (Confidence).
 2. **Model phân đoạn (TV2 gốc đã tối ưu):** Định vị các vùng tổn thương (Microaneurysm, Hemorrhage, Hard Exudate) và tính tỷ lệ diện tích tổn thương trên ảnh.
 
-### Bước 4: Hỗ Trợ Lâm Sàng & Phân Tầng Nguy Cơ (TV3 thực hiện)
-Clinical Orchestrator thu thập dữ liệu từ AI và bệnh án để chạy thuật toán y học:
+### Bước 4: Hỗ trợ sàng lọc và ưu tiên bác sĩ rà soát
+Clinical Analysis Module tổng hợp dữ liệu thành dự thảo:
 - **Kiểm tra độ tin cậy:** Nếu `confidence` < 70%, hệ thống gắn cờ cảnh báo để bác sĩ cẩn trọng khi duyệt.
-- **Tính điểm nguy cơ lâm sàng (0-100):** Tích hợp thông tin DR Grade, diện tích tổn thương cùng các yếu tố nguy cơ hệ thống (HbA1c cao, huyết áp cao, số năm bị bệnh lâu).
-- **Quyết định thời gian chuyển tuyến & tái khám:** Áp dụng luật lâm sàng theo **ICO 2017 Table 3b**:
-  - *Grade 0-1 (Risk thấp):* Tái khám sau 12-24 tháng.
-  - *Grade 2 (NPDR Moderate):* Tái khám sau 6-12 tháng.
-  - *Grade 3 (NPDR Severe):* Yêu cầu chuyển tuyến nhãn khoa trong vòng 1 tháng.
-  - *Grade 4 (PDR):* Yêu cầu chuyển tuyến khẩn cấp trong vòng 24-48 giờ do có nguy cơ mù lòa cấp tính.
-  - *Nghi ngờ DME (Phù hoàng điểm):* Yêu cầu chuyển tuyến khẩn cấp điều trị Anti-VEGF hoặc laser.
+- **Không tính risk score y khoa tự đặt.** Chỉ có `review_priority` để sắp hàng đợi.
+- **Mốc tham khảo:** Grade 3 chuyển chuyên khoa và đánh giá không quá 3 tháng;
+  Grade 4 chuyển tuyến tỉnh/trung ương dưới 1 tháng. Grade 0–2 do bác sĩ cá thể hóa.
+- **Hoàng điểm:** hard exudate chỉ kích hoạt đánh giá hoàng điểm; không kết luận
+  DME hoặc chỉ định anti-VEGF/laser nếu thiếu vị trí dày võng mạc/OCT.
+- Giảm thị lực đột ngột được chuyển khám trong ngày, không chờ AI; thị lực dưới
+  5/10 được chuyển chuyên khoa kể cả ảnh không thấy DR.
 - **Sinh báo cáo:** Tạo báo cáo tóm tắt Markdown và xuất PDF nhúng kèm ảnh võng mạc minh chứng.
 
 ### Bước 5: Duyệt Kết Quả & Database
@@ -149,11 +151,11 @@ Clinical Orchestrator thu thập dữ liệu từ AI và bệnh án để chạy
 - Bác sĩ có quyền phê duyệt kết quả AI (Confirm) hoặc thay đổi mức độ chẩn đoán theo kinh nghiệm lâm sàng cá nhân (Override).
 - Dữ liệu được lưu trữ chính thức vào PostgreSQL để tự động đặt lịch nhắc hẹn tái khám cho bệnh nhân.
 
-### Bước 6: Vòng Lặp Tối Ưu Hóa Offline (TV3 thực hiện)
-Kho ảnh tích lũy qua thời gian trong Database được sử dụng để tối ưu hóa model:
-- **Semi-supervised:** Sử dụng mô hình hiện hành để gán nhãn giả (Pseudo-Labeling) cho ảnh chưa nhãn đạt độ tin cậy $\ge 95\%$, sau đó chạy retrain offline để cải tiến mô hình.
-- **Few-shot:** Khi bác sĩ chẩn đoán và gắn nhãn cho 1-5 ảnh ca bệnh hiếm gặp, ProtoNet sẽ tính toán Prototype đại diện để mô hình có khả năng nhận diện lớp bệnh mới ngay lập tức.
-- Trọng số model mới tốt hơn sẽ được deploy để thay thế mô hình cũ đang chạy online.
+### Bước 6: Nghiên cứu offline, tách khỏi inference
+Pseudo-labeling/Few-shot chỉ chạy trong môi trường nghiên cứu với consent/quản trị
+dữ liệu phù hợp. Model mới phải vượt baseline trên test set giữ kín, được hiệu
+chỉnh, bác sĩ phê duyệt và quản lý phiên bản trước khi adapter production sử dụng.
+Không tự động học từ database hoặc deploy chỉ dựa trên confidence.
 
 ---
 

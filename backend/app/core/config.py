@@ -26,12 +26,18 @@ class Settings:
     )
     
     # Cấu hình Bảo mật
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "yoursecretkeyherechangeitinproduction2026")
+    SECRET_KEY: str = os.getenv(
+        "SECRET_KEY",
+        os.getenv("JWT_SECRET", "yoursecretkeyherechangeitinproduction2026"),
+    )
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", os.getenv("JWT_EXPIRE_MINUTES", 1440))
+    )
     
     # Các cổng dịch vụ AI
     AI_GRADING_SERVICE_URL: str = os.getenv("AI_GRADING_SERVICE_URL", "http://localhost:8001")
     AI_SEGMENTATION_SERVICE_URL: str = os.getenv("AI_SEGMENTATION_SERVICE_URL", "http://localhost:8002")
+    AI_REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", 120))
 
 settings = Settings()

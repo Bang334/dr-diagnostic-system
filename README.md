@@ -19,7 +19,7 @@ graph TD
     E -->|5.2 Phân đoạn tổn thương - Segmentation| G[U-Net & Variants]
     F -->|Kết quả DR Grade & Confidence| H[Clinical Orchestrator]
     G -->|Tọa độ & Tỉ lệ vùng tổn thương| H
-    H -->|6. Phân tầng nguy cơ & Khuyến nghị| I[Clinical Rules Engine]
+    H -->|6. Ưu tiên bác sĩ rà soát & Khuyến nghị dự thảo| I[Clinical Rules Engine]
     I -->|7. Tạo báo cáo chi tiết| C
     C -->|8. Lưu trữ dữ liệu| J[(Database PostgreSQL)]
     C -->|9. Trả về kết quả phân tích| B
@@ -73,6 +73,11 @@ dr-diagnostic-system/
 | **Thành viên 1** | **Phân loại mức độ DR (DR Grading)** | - **Nghiên cứu:** Bài toán DR Grading; Thang phân loại ICDR/ETDRS; Các mô hình (EfficientNet, ResNet, ConvNeXt); Các chỉ số đánh giá (Accuracy, Precision, Recall, F1, QWK).<br>- **Thực hành:** Thu thập dữ liệu (EyePACS, APTOS 2019); Tiền xử lý (Resize, Green Channel, CLAHE, Ben Graham); Huấn luyện mô hình phân loại 5 mức; So sánh chọn mô hình tối ưu; Đóng gói mô hình thành API. | - Tham gia thiết kế và xây dựng giao diện bác sĩ (Frontend) hiển thị mức độ phân loại bệnh và độ tin cậy AI.<br>- Tích hợp API Grading vào luồng xử lý chung của Backend. |
 | **Thành viên 2** | **Phân đoạn tổn thương (Lesion Segmentation)** | - **Nghiên cứu:** Các loại tổn thương (Microaneurysm, Hemorrhage, Hard Exudate); Các kiến trúc (U-Net, U-Net++, Attention U-Net); Chỉ số đánh giá (Dice Score, IoU).<br>- **Thực hành:** Thu thập dữ liệu (IDRiD, DDR); Tiền xử lý ảnh phục vụ segmentation; Huấn luyện mô hình phân đoạn; Sinh bản đồ tổn thương (mask) dạng overlay. | - Tham gia thiết kế và xây dựng giao diện hiển thị ảnh võng mạc (Frontend) vẽ đè bản đồ tổn thương.<br>- Tích hợp API Segmentation vào luồng xử lý chung của Backend. |
 | **Thành viên 3** | **AI Nâng Cao & Hỗ Trợ Lâm Sàng** | - **Nghiên cứu:** Kỹ thuật Semi-supervised Learning, Few-shot Learning; Tiêu chuẩn ứng dụng AI nhãn khoa tại Việt Nam; Quy trình hỗ trợ chẩn đoán lâm sàng.<br>- **Thực hành:** Thử nghiệm Semi-supervised/Few-shot; Xây dựng module tổng hợp kết quả (phân loại + phân đoạn); Sinh báo cáo tự động (mức độ DR, vùng tổn thương, khuyến nghị điều trị dựa trên hướng dẫn lâm sàng). | - Tham gia thiết kế hệ thống, kiến trúc CSDL PostgreSQL.<br>- Xây dựng Module xuất phiếu kết quả PDF, phân hệ thống kê dịch tễ (Dashboard) và quản trị hệ thống. |
+
+> Trạng thái hiện tại: module lâm sàng, adapter AI, bộ ảnh bốn trường, PDF và
+> human review đã được tích hợp. Semi-supervised/Few-shot vẫn là nghiên cứu chưa
+> nghiệm thu trên dữ liệu thật; xem `docs/tv3_integration_status.md`. Mọi kết quả
+> lâm sàng là dự thảo, không tự chẩn đoán DME hoặc chỉ định điều trị.
 
 ---
 
