@@ -1,52 +1,42 @@
-# Phân Hệ Thực Hành AI Nâng Cao (Semi-supervised & Few-shot Learning)
+# Semi-supervised / Few-shot — trạng thái nghiên cứu
 
-Thư mục này chứa mã nguồn thực hành và thử nghiệm các kỹ thuật học máy nâng cao dành cho **Thành viên 3** nhằm tối ưu hóa việc sử dụng dữ liệu ảnh võng mạc ít nhãn hoặc chưa gán nhãn trong thực tế.
+Mã scaffold đã được chuyển vào chính thư mục này nhưng chưa được đưa vào
+inference của hệ thống chính. Lý do: workspace không có dataset,
+checkpoint, patient-level split hoặc báo cáo metric trên test set giữ kín.
 
----
+- `semi_supervised_training.py`: pseudo-labeling scaffold; chưa có supervised
+  baseline, calibration hoặc kết quả trên ảnh thật.
+- `few_shot_demo.py`: ProtoNet chạy trên tensor giả lập; không phải thí nghiệm
+  few-shot y khoa.
 
-## 📂 Các File Mã Nguồn Khung
+Tiêu chí nghiệm thu và tích hợp model được ghi tại
+`docs/tv3_integration_status.md`. Chỉ model đã validation và có version mới được
+triển khai sau `AI_GRADING_SERVICE_URL`/`AI_SEGMENTATION_SERVICE_URL`.
 
-1. **`semi_supervised_training.py`:** Chương trình PyTorch thực hành kỹ thuật **Pseudo-Labeling** (Tự gán nhãn giả). Giúp mô hình học từ cả ảnh võng mạc có nhãn (tập APTOS/EyePACS) và ảnh võng mạc chưa có nhãn thu thập tại bệnh viện.
-2. **`few_shot_demo.py`:** Chương trình PyTorch thực hành kiến trúc **Prototypical Networks (ProtoNet)** phục vụ phân loại nhanh ảnh võng mạc với chỉ 1 hoặc 5 ảnh mẫu cho mỗi lớp (1-shot / 5-shot learning) có tích hợp **Episodic Training**.
+Không sao chép checkpoint thử nghiệm vào backend và không tự học lại từ dữ
+liệu bệnh nhân production. Hai script được giữ để tái lập nghiên cứu, không phải
+model production.
 
----
+## Môi trường nghiên cứu
 
-## 🛠️ Hướng Dẫn Chuẩn Bị Dữ Liệu
-
-### 1. Dữ liệu học bán giám sát (Semi-supervised)
-Bạn cần tổ chức dữ liệu thành hai thư mục riêng biệt tại máy cục bộ hoặc server training:
+```powershell
+pip install -r ai/semi_supervised/requirements-research.txt
 ```
+
+## Cấu trúc dữ liệu pseudo-labeling
+
+```text
 data/dr_semi_supervised/
-├── labeled/              # Thư mục chứa ảnh có nhãn (ví dụ: APTOS 2019)
-│   ├── class_0/              # Không bệnh DR
-│   ├── class_1/              # Mild NPDR
-│   ├── class_2/              # Moderate NPDR
-│   ├── class_3/              # Severe NPDR
-│   └── class_4/              # Proliferative DR
-└── unlabeled/            # Thư mục chứa các ảnh chụp võng mạc CHƯA gán nhãn
-    ├── unlabeled_img_001.png
-    ├── unlabeled_img_002.png
-    └── ...
+├── labeled/class_0 ... class_4/
+└── unlabeled/
 ```
 
-### 2. Thư viện yêu cầu
-Để chạy mã nguồn huấn luyện, cần cài đặt thêm PyTorch và Torchvision:
-```bash
-pip install torch torchvision scikit-learn pandas pillow
-```
+Chạy scaffold:
 
----
-
-## 🚀 Cách Chạy Thử Nghiệm
-
-### Huấn luyện Semi-supervised (Pseudo-labeling):
-```bash
-python ai/semi_supervised/semi_supervised_training.py --labeled_dir data/dr_semi_supervised/labeled --unlabeled_dir data/dr_semi_supervised/unlabeled --epochs 10
-```
-
-### Chạy demo Few-shot learning (Prototypical Networks):
-```bash
+```powershell
+python ai/semi_supervised/semi_supervised_training.py --labeled_dir data/dr_semi_supervised/labeled --unlabeled_dir data/dr_semi_supervised/unlabeled
 python ai/semi_supervised/few_shot_demo.py
 ```
-> [!TIP]
-> Bạn có thể tinh chỉnh các thông số mạng xương sống (Backbone) như đổi từ `resnet18` sang `efficientnet_b0` trong file code để đạt độ chính xác phân tầng cao hơn.
+
+Lệnh thứ hai chỉ chạy tensor giả lập. Không công bố accuracy của demo như kết
+quả trên ảnh võng mạc.

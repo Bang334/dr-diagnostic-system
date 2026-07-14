@@ -45,13 +45,17 @@ CREATE TABLE IF NOT EXISTS screenings (
     -- Ảnh chụp võng mạc nguyên bản (đường dẫn lưu file trên storage)
     left_eye_image_url TEXT NOT NULL,
     right_eye_image_url TEXT NOT NULL,
+    left_disc_image_url TEXT,
+    right_disc_image_url TEXT,
     
     -- Đánh giá chất lượng ảnh chụp võng mạc (Quality Control)
-    left_eye_image_quality VARCHAR(20) DEFAULT 'Good' CHECK (left_eye_image_quality IN ('Good', 'Fair', 'Poor')),
-    right_eye_image_quality VARCHAR(20) DEFAULT 'Good' CHECK (right_eye_image_quality IN ('Good', 'Fair', 'Poor')),
+    left_eye_image_quality VARCHAR(20) DEFAULT 'ReviewRequired' CHECK (left_eye_image_quality IN ('ReviewRequired', 'Good', 'Fair', 'Poor', 'Rejected')),
+    right_eye_image_quality VARCHAR(20) DEFAULT 'ReviewRequired' CHECK (right_eye_image_quality IN ('ReviewRequired', 'Good', 'Fair', 'Poor', 'Rejected')),
     
     -- Trạng thái quy trình
     status VARCHAR(20) DEFAULT 'Pending' CHECK (status IN ('Pending', 'AI_Analyzed', 'Reviewed', 'Archived')),
+    review_status VARCHAR(20) DEFAULT 'draft' CHECK (review_status IN ('draft', 'confirmed', 'overridden')),
+    clinical_assessment JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
