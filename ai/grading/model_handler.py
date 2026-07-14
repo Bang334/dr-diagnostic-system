@@ -18,7 +18,7 @@ class DRModelHandler:
         """
         self.model_path = model_path
         self.model = None
-        self.input_size = (224, 224) # Kích thước người dùng cung cấp
+        self.input_size = (300, 300) # EfficientNetB3 dùng size 300
         self.model_version = "efficientnet_b3_v1.0"
         
         self._load_model()
@@ -31,17 +31,39 @@ class DRModelHandler:
             
         print(f"[*] Đang load model từ {self.model_path}...")
         try:
-            # Khởi tạo kiến trúc mạng y hệt config gốc để bypass lỗi Keras 3
-            base_model = tf.keras.applications.EfficientNetB3(include_top=False, input_shape=(224, 224, 3))
+            # KHẮC PHỤC LỖI KHÁC VERSION KERAS (quantization_config):
+            # Tự build lại ĐÚNG y hệt kiến trúc model thay vì dùng load_model để tránh lỗi parse config.
+            from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+            from tensorflow.keras import layers, models
+            from tensorflow.keras.applications import EfficientNetB3
             
-            self.model = tf.keras.Sequential([
-                base_model,
-                tf.keras.layers.GlobalAveragePooling2D(),
-                tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(5, activation='softmax')
-            ])
+            data_augmentation = models.Sequential([
+                layers.RandomFlip("horizontal_and_vertical"),
+                layers.RandomRotation(0.2),
+                layers.RandomZoom((-0.1, 0.1)),
+            ], name="data_augmentation")
+
+            inputs = layers.Input(shape=(300, 300, 3))
+            x = data_augmentation(inputs)
+            x = layers.Lambda(effnet_preprocess, name="preprocess_input")(x)
             
-            # Chỉ load weights thay vì load toàn bộ model để tránh lỗi deserialization
+            base_model = EfficientNetB3(weights=None, include_top=False, input_shape=(300, 300, 3))
+            x = base_model(x, training=False)
+
+            avg_pool = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+            max_pool = layers.GlobalMaxPooling2D(name="max_pool")(x)
+            x = layers.Concatenate(name="dual_pool")([avg_pool, max_pool])
+
+            x = layers.BatchNormalization()(x)
+            x = layers.Dense(512, activation='relu', name="head_dense1")(x)
+            x = layers.Dropout(0.5)(x)
+            x = layers.Dense(128, activation='relu', name="head_dense2")(x)
+            x = layers.Dropout(0.3)(x)
+
+            outputs = layers.Dense(5, activation='softmax', dtype='float32', name="predictions")(x)
+            self.model = models.Model(inputs, outputs)
+            
+            # Load trọng số vào khung kiến trúc đã dựng chuẩn
             self.model.load_weights(self.model_path)
             print("[v] Load model thành công!")
         except Exception as e:

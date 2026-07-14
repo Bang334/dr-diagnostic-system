@@ -60,6 +60,24 @@ async def startup_event():
 def root():
     return {"message": "DR Grading API is running. Gửi POST request tới /analyze để phân tích ảnh."}
 
+@app.get("/model-info")
+def get_model_info():
+    """Trả về thông tin về file model đang được load để dễ dàng kiểm chứng."""
+    if not os.path.exists(MODEL_PATH):
+        return {"error": "Không tìm thấy file model!"}
+    
+    file_stat = os.stat(MODEL_PATH)
+    import datetime
+    last_modified = datetime.datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+    size_mb = round(file_stat.st_size / (1024 * 1024), 2)
+    
+    return {
+        "model_path": MODEL_PATH,
+        "last_modified": last_modified,
+        "size_MB": size_mb,
+        "model_version": dr_model.model_version if dr_model else "Unknown"
+    }
+
 @app.post("/analyze")
 async def analyze_fundus(file: UploadFile = File(...)):
     """
@@ -84,11 +102,12 @@ async def analyze_fundus(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(content)
             
-        # 3. Chạy pipeline Tiền Xử Lý (dùng chung hàm ở bài trước)
-        preprocessed_img = preprocess_fundus_image(temp_path, img_size=dr_model.input_size[0])
-        
-        if preprocessed_img is None:
+        # SỬ DỤNG OPENCV ĐỌC ẢNH GỐC CHO KHỚP VỚI LÚC TRAIN (KHÔNG DÙNG BEN GRAHAM)
+        img = cv2.imread(temp_path)
+        if img is None:
             raise HTTPException(status_code=400, detail="Không thể đọc hoặc xử lý ảnh. Ảnh có thể bị hỏng.")
+            
+        preprocessed_img = img # Giữ nguyên ảnh gốc
 
         # 4. Dự đoán qua Model (Inference)
         result = dr_model.predict(preprocessed_img)
