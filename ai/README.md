@@ -21,6 +21,18 @@ Thư mục này chứa mã nguồn phục vụ việc nghiên cứu, tiền xử
 
 ---
 
+## ⬇️ Hướng Dẫn Tải Model (Dành Cho Lập Trình Viên)
+
+Vì giới hạn kích thước file của GitHub, các file trọng số (model `.keras`) sẽ KHÔNG được push lên repository này. Để chạy được API Grading ở máy cá nhân (Local), bạn phải làm theo 2 bước sau:
+
+1. Tải file model `best_EfficientNetB3.keras` từ liên kết lưu trữ đám mây của dự án: [Tải Model tại đây (Google Drive)](https://drive.google.com/file/d/1xaJAtbyHBJE5IRWwiv2U5ZaUnyI5wtq8/view?usp=drive_link).
+2. Đổi tên file vừa tải thành **`dr_grading_model.keras`** và đặt nó vào đường dẫn chuẩn sau:
+   `ai/weights/dr_grading_model.keras`
+
+Nếu chưa có file này, khi bạn khởi chạy uvicorn, API sẽ tự động tạo một file rỗng để tránh sập server nhưng sẽ báo lỗi `503 Service Unavailable` khi bạn thực hiện gọi API `/analyze`.
+
+---
+
 ## 🛠️ Quy Chuẩn Dữ Liệu Đầu Ra (API Contract)
 
 Để phân hệ AI có thể tích hợp mượt mà với Backend (FastAPI) và Frontend, các API phục vụ inference của mô hình AI cần tuân thủ định dạng JSON sau:
