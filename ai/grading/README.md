@@ -35,6 +35,11 @@ As an alternative in an interactive terminal, run `huggingface-cli login`.
 The GitHub repository owner/user is `Bang334`; no Hugging Face or GitHub token
 is stored in tracked files.
 
+When Colab Secrets are unavailable (for example, a Colab kernel attached from
+VS Code), the notebook falls back to a hidden `getpass` prompt. The supplied
+value exists only in the current runtime environment and must be entered again
+after a runtime reset.
+
 For the APTOS download cell, create a second Colab secret named
 `KAGGLE_API_TOKEN` using a token generated at Kaggle **Settings → API**. The
 notebook exports it only to the current runtime. You must also accept the APTOS
