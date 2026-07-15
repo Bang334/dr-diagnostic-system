@@ -123,6 +123,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-size", type=float, default=0.15)
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate --resume checkpoint on the test split without training",
+    )
     parser.add_argument("--enhance", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     return parser.parse_args()
@@ -151,6 +156,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("val-size + test-size must be below 1")
     if args.accum_steps < 1:
         raise ValueError("accum-steps must be at least 1")
+    if args.eval_only and args.resume is None:
+        raise ValueError("--eval-only requires --resume CHECKPOINT")
 
 
 def seed_everything(seed: int) -> None:
@@ -791,6 +798,23 @@ def main() -> None:
         best_qwk = float(resume_state.get("best_qwk", -1.0))
         stale_epochs = int(resume_state.get("stale_epochs", 0))
         print(f"Resuming from epoch {start_epoch}; best QWK={best_qwk:.4f}")
+
+    if args.eval_only:
+        test_loss, targets, predictions, image_ids = evaluate(
+            model,
+            loaders["test"],
+            criterion,
+            device,
+            args.loss,
+            amp_enabled,
+        )
+        metrics = {"loss": test_loss, **calculate_metrics(targets, predictions)}
+        save_evaluation_artifacts(
+            args.output_dir, targets, predictions, image_ids, metrics
+        )
+        print(f"Test metrics for checkpoint epoch {start_epoch - 1}:")
+        print(json.dumps(metrics, indent=2, ensure_ascii=False))
+        return
 
     freeze_backbone = start_epoch < args.freeze_epochs
     configure_trainable(model, freeze_backbone)
