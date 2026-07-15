@@ -50,12 +50,18 @@ def parse_args() -> argparse.Namespace:
         default=Path("eval_output"),
         help="Directory where test_metrics.json and confusion matrix will be saved",
     )
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument(
         "--no-amp",
         action="store_true",
         help="Disable automatic mixed precision (AMP)",
+    )
+    parser.add_argument(
+        "--limit-per-class",
+        type=int,
+        default=None,
+        help="Limit the number of samples per class for quick testing (e.g. 50)",
     )
     return parser.parse_args()
 
@@ -81,14 +87,28 @@ def load_test_split(args: argparse.Namespace, fake_args: argparse.Namespace):
     split_paths = find_predefined_splits(args.dataset_dir)
     dataset_root = next(iter(split_paths.values())).parent
     test_df = scan_classification_split(split_paths["test"], dataset_root)
+    
+    if getattr(args, "limit_per_class", None) is not None:
+        limit = args.limit_per_class
+        # Group by label (diagnosis) và lấy N dòng đầu tiên của mỗi nhóm
+        test_df = test_df.groupby("diagnosis").head(limit).reset_index(drop=True)
+        
     counts = test_df["diagnosis"].value_counts().sort_index().to_dict()
-    print(f"Test split: {len(test_df):,} samples → {counts}")
+    print(f"Test split (limited): {len(test_df):,} samples → {counts}")
     return test_df
 
 
 def load_checkpoint(checkpoint_path: Path, device: torch.device):
     print(f"Loading checkpoint: {checkpoint_path}")
-    state = torch.load(checkpoint_path, map_location=device)
+    
+    # Khắc phục lỗi PosixPath trên hệ điều hành Windows
+    import pathlib
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.WindowsPath
+    try:
+        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    finally:
+        pathlib.PosixPath = temp
 
     # Reconstruct model using the args that were saved inside the checkpoint
     saved_args = argparse.Namespace(**state["args"])

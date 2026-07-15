@@ -466,7 +466,7 @@ def load_retfound_dinov2(args: argparse.Namespace, output_dim: int) -> nn.Module
         filename=f"{args.retfound_id}.pth",
         token=hf_token,
     )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "teacher" not in checkpoint:
         raise KeyError("RETFound-DINOv2 checkpoint does not contain a 'teacher' state")
     state = checkpoint["teacher"]
@@ -785,7 +785,7 @@ def main() -> None:
     start_epoch, best_qwk, stale_epochs = 0, -1.0, 0
     resume_state = None
     if args.resume:
-        resume_state = torch.load(args.resume, map_location="cpu")
+        resume_state = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(resume_state["model"])
         start_epoch = int(resume_state["epoch"]) + 1
         best_qwk = float(resume_state.get("best_qwk", -1.0))
@@ -870,7 +870,7 @@ def main() -> None:
             print(f"Early stopping after {stale_epochs} epochs without QWK improvement")
             break
 
-    best = torch.load(args.output_dir / "checkpoint-best.pth", map_location="cpu")
+    best = torch.load(args.output_dir / "checkpoint-best.pth", map_location="cpu", weights_only=False)
     model.load_state_dict(best["model"])
     model.to(device)
     test_loss, targets, predictions, image_ids = evaluate(
