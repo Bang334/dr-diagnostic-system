@@ -1,57 +1,60 @@
 # DR grading training
 
-`train.py` fine-tunes a five-grade APTOS classifier and deliberately keeps the
-held-out test split untouched until the best validation-QWK checkpoint has been
-selected.
+`train.py` fine-tunes a five-grade diabetic-retinopathy classifier on the
+[merged Fundus dataset](https://www.kaggle.com/datasets/sehastrajits/fundus-aptosddridirdeyepacsmessidor),
+which combines APTOS, DDR, IDRiD, EyePACS and Messidor images. The dataset is
+about 10.9 GB and already provides `train`, `validation` and `test` directories
+under `split_dataset`; the loader preserves these splits instead of randomly
+splitting them again.
+
+Expected layout:
+
+```text
+split_dataset/
+├── train/{0,1,2,3,4}/*.jpg
+├── validation/{0,1,2,3,4}/*.jpg
+└── test/{0,1,2,3,4}/*.jpg
+```
+
+Grades are `0=No DR`, `1=Mild`, `2=Moderate`, `3=Severe`, and
+`4=Proliferative DR`.
 
 ## Colab setup
 
-Run from the project root. Copy/unzip the image dataset into `/content` for fast
-reads and keep the output directory on Drive so runtime interruptions do not
-lose checkpoints.
+Use the supplied `DR_Training_Colab.ipynb`. It checks out
+`feat/merged-dataset-training`, downloads the Kaggle dataset, stores checkpoints
+on Drive, and can resume from `checkpoint-last.pth` after a runtime reset.
+
+Create these private Colab Secrets and grant the notebook access:
+
+- `KAGGLE_API_TOKEN`: generated from Kaggle Settings → API;
+- `HF_TOKEN`: a Hugging Face read token with approved access to
+  `YukunZhou/RETFound_dinov2_meh`.
+
+Never paste either token into a notebook cell or commit one to Git. When Colab
+Secrets are unavailable, the notebook uses a hidden session-only prompt.
+
+On a T4, allow roughly 10–30 minutes for the 10.9 GB download and 2–4 days for
+30 RETFound epochs. Actual time depends on Colab storage and GPU allocation.
+
+## Command-line setup
+
+From the project root:
 
 ```bash
-git clone https://github.com/Bang334/dr-diagnostic-system.git
-cd dr-diagnostic-system
 pip install -r ai/grading/requirements-train.txt
+python -m ai.grading.download_data --output-dir /content/fundus_merged
 ```
 
-Access to `YukunZhou/RETFound_dinov2_meh` on Hugging Face must be approved
-before the first RETFound run.
+The downloader reads `KAGGLE_API_TOKEN` or `~/.kaggle/kaggle.json` and extracts
+the data to `/content/fundus_merged/split_dataset`.
 
-Do **not** paste a Hugging Face token into this repository or notebook source.
-In Colab, open the key icon (**Secrets**), create a secret named `HF_TOKEN`,
-grant notebook access, then run this private setup cell:
-
-```python
-import os
-from google.colab import userdata
-
-os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
-assert os.environ["HF_TOKEN"], "HF_TOKEN is missing from Colab Secrets"
-```
-
-As an alternative in an interactive terminal, run `huggingface-cli login`.
-The GitHub repository owner/user is `Bang334`; no Hugging Face or GitHub token
-is stored in tracked files.
-
-When Colab Secrets are unavailable (for example, a Colab kernel attached from
-VS Code), the notebook falls back to a hidden `getpass` prompt. The supplied
-value exists only in the current runtime environment and must be entered again
-after a runtime reset.
-
-For the APTOS download cell, create a second Colab secret named
-`KAGGLE_API_TOKEN` using a token generated at Kaggle **Settings → API**. The
-notebook exports it only to the current runtime. You must also accept the APTOS
-competition rules before the Kaggle CLI can download the files.
-
-## Recommended T4 16 GB baseline
+Recommended RETFound baseline:
 
 ```bash
 python -m ai.grading.train \
-  --images-dir /content/aptos/train_images \
-  --labels-csv /content/aptos/train.csv \
-  --output-dir /content/drive/MyDrive/dr_runs/retfound_cbce_seed42 \
+  --dataset-dir /content/fundus_merged/split_dataset \
+  --output-dir /content/drive/MyDrive/dr_runs/retfound_merged_seed42 \
   --model-source retfound \
   --retfound-id RETFound_dinov2_meh \
   --image-size 224 \
@@ -60,53 +63,53 @@ python -m ai.grading.train \
   --freeze-epochs 3 \
   --epochs 30 \
   --loss ce \
-  --balance effective
+  --balance none
 ```
 
-Resume an interrupted run with:
+The merged training set is balanced, so the baseline uses `--balance none`.
+Use `--balance sampler` only for an intentional ablation. Resume with the same
+arguments plus:
 
 ```bash
-python -m ai.grading.train <same arguments> \
-  --resume /content/drive/MyDrive/dr_runs/retfound_cbce_seed42/checkpoint-last.pth
+--resume /content/drive/MyDrive/dr_runs/retfound_merged_seed42/checkpoint-last.pth
 ```
 
-The split CSV files are created once under `<output-dir>/splits` and reused.
-Keep them with every experiment so all backbones are compared on identical
-images. For an ordinal ablation, use `--loss coral --balance sampler`; do not
-combine CORAL with effective-number class weights in the same experiment.
+The scanner writes immutable split manifests to `<output-dir>/splits`. Model
+selection uses validation QWK; the test split is evaluated only after training
+and selection finish.
 
 Outputs include:
 
-- `checkpoint-best.pth`, selected by validation quadratic weighted kappa;
-- `checkpoint-last.pth`, suitable for Colab resume;
+- `checkpoint-best.pth` and resumable `checkpoint-last.pth`;
 - `history.jsonl`;
 - `test_metrics.json` and `test_predictions.csv`;
-- `confusion_matrix_normalized.png`.
+- `confusion_matrix_normalized.png`;
+- `splits/train.csv`, `splits/val.csv`, and `splits/test.csv`.
 
 ## Lightweight fallback
 
-If RETFound does not fit the assigned GPU, keep every other setting fixed and
-change only the model:
+If RETFound does not fit the assigned GPU, keep the data and evaluation setup
+fixed and change only the backbone:
 
 ```bash
-python -m ai.grading.train <data/output arguments> \
+python -m ai.grading.train \
+  --dataset-dir /content/fundus_merged/split_dataset \
+  --output-dir /content/drive/MyDrive/dr_runs/convnext_merged_seed42 \
   --model-source timm \
   --model-name convnext_tiny.fb_in22k_ft_in1k \
   --image-size 384 \
   --batch-size 8 \
   --accum-steps 2 \
   --loss ce \
-  --balance effective
+  --balance none
 ```
 
-Do not initialize from a checkpoint already fine-tuned on APTOS when evaluating
-on a new APTOS split; that can leak held-out images into training.
+The legacy `--images-dir` plus `--labels-csv` input remains supported for older
+APTOS experiments, but it cannot be combined with `--dataset-dir`.
 
 ## Preprocessing contract
 
-Training and the current Keras API now share the colour-preserving crop in
+Training and the current Keras API share the colour-preserving crop in
 `ai.preprocessing.fundus_prep`. The default is crop + resize with RGB retained.
 If an experiment is trained with `--enhance`, deploy it with
-`DR_PREPROCESS_ENHANCE=1`; otherwise leave that variable unset. A PyTorch API
-handler for the resulting RETFound checkpoint can be added after the first
-validated checkpoint exists.
+`DR_PREPROCESS_ENHANCE=1`; otherwise leave that variable unset.

@@ -1,9 +1,9 @@
 """Colab-friendly fine-tuning pipeline for five-grade diabetic retinopathy.
 
 The script supports the retina-specific RETFound-DINOv2 checkpoint and lighter
-``timm`` backbones.  It creates a persistent stratified split, keeps the test
-set untouched until training ends, and reports metrics that expose minority
-class failures (macro-F1, balanced accuracy, per-class recall and QWK).
+``timm`` backbones. It consumes either predefined folder splits or a legacy
+flat image directory plus CSV, keeps the test set untouched until training
+ends, and reports macro-F1, balanced accuracy, per-class recall and QWK.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import json
 import math
 import os
 import random
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -51,12 +52,27 @@ NUM_CLASSES = 5
 CLASS_NAMES = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+SPLIT_ALIASES = {
+    "train": ("train", "training"),
+    "val": ("val", "valid", "validation"),
+    "test": ("test", "testing"),
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--images-dir", required=True, type=Path)
-    parser.add_argument("--labels-csv", required=True, type=Path)
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        help=(
+            "Root of a folder-classification dataset with predefined "
+            "train/validation/test splits (for example split_dataset from the "
+            "merged Kaggle fundus dataset)"
+        ),
+    )
+    parser.add_argument("--images-dir", type=Path, help="Legacy flat image directory")
+    parser.add_argument("--labels-csv", type=Path, help="Legacy CSV label file")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--split-dir", type=Path, default=None)
     parser.add_argument("--image-column", default="id_code")
@@ -113,6 +129,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    using_predefined = args.dataset_dir is not None
+    using_legacy = args.images_dir is not None or args.labels_csv is not None
+    if using_predefined == using_legacy:
+        raise ValueError(
+            "Choose exactly one data input: --dataset-dir, or both "
+            "--images-dir and --labels-csv"
+        )
+    if using_legacy and (args.images_dir is None or args.labels_csv is None):
+        raise ValueError("--images-dir and --labels-csv must be provided together")
     if args.model_source == "retfound" and args.image_size != 224:
         raise ValueError("RETFound-DINOv2 currently requires --image-size 224")
     if args.loss == "coral" and args.balance == "effective":
@@ -137,7 +162,7 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-def load_or_create_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+def load_or_create_csv_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
     split_dir = args.split_dir or (args.output_dir / "splits")
     split_dir.mkdir(parents=True, exist_ok=True)
     paths = {name: split_dir / f"{name}.csv" for name in ("train", "val", "test")}
@@ -180,7 +205,128 @@ def load_or_create_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
     return splits
 
 
-class AptosDataset(Dataset):
+def _class_label_from_dir(name: str) -> int:
+    """Map the merged dataset's class directory name to a DR grade."""
+    stripped = name.strip().lower()
+    numeric_prefix = re.match(r"^([0-4])(?:\D|$)", stripped)
+    if numeric_prefix:
+        return int(numeric_prefix.group(1))
+
+    normalized = re.sub(r"[^a-z0-9]+", "", stripped)
+    aliases = {
+        "nodr": 0,
+        "normal": 0,
+        "healthy": 0,
+        "mild": 1,
+        "milddr": 1,
+        "moderate": 2,
+        "moderatedr": 2,
+        "severe": 3,
+        "severedr": 3,
+        "proliferative": 4,
+        "proliferativedr": 4,
+        "pdr": 4,
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unsupported class directory {name!r}; expected 0..4 or a standard DR class name"
+        )
+    return aliases[normalized]
+
+
+def _split_directories(candidate: Path) -> dict[str, Path] | None:
+    if not candidate.is_dir():
+        return None
+    children = {child.name.lower(): child for child in candidate.iterdir() if child.is_dir()}
+    resolved: dict[str, Path] = {}
+    for canonical, aliases in SPLIT_ALIASES.items():
+        match = next((children[alias] for alias in aliases if alias in children), None)
+        if match is None:
+            return None
+        resolved[canonical] = match
+    return resolved
+
+
+def find_predefined_splits(dataset_dir: Path) -> dict[str, Path]:
+    """Locate train/validation/test, including Kaggle's split_dataset wrapper."""
+    dataset_dir = dataset_dir.expanduser().resolve()
+    if not dataset_dir.is_dir():
+        raise FileNotFoundError(f"Dataset directory does not exist: {dataset_dir}")
+
+    candidates = [dataset_dir]
+    candidates.extend(child for child in dataset_dir.iterdir() if child.is_dir())
+    for child in list(candidates[1:]):
+        candidates.extend(grandchild for grandchild in child.iterdir() if grandchild.is_dir())
+    for candidate in candidates:
+        splits = _split_directories(candidate)
+        if splits:
+            print(f"Using predefined splits from {candidate}")
+            return splits
+    raise ValueError(
+        f"Could not find train/validation/test below {dataset_dir}. "
+        "Point --dataset-dir at the extracted dataset or its split_dataset directory."
+    )
+
+
+def scan_classification_split(split_dir: Path, dataset_root: Path) -> pd.DataFrame:
+    records: list[dict[str, Any]] = []
+    seen_labels: set[int] = set()
+    for class_dir in sorted((path for path in split_dir.iterdir() if path.is_dir())):
+        label = _class_label_from_dir(class_dir.name)
+        if label in seen_labels:
+            raise ValueError(f"Duplicate directories for grade {label} under {split_dir}")
+        seen_labels.add(label)
+        for image_path in sorted(class_dir.rglob("*")):
+            if image_path.is_file() and image_path.suffix.lower() in IMAGE_EXTENSIONS:
+                records.append(
+                    {
+                        "image_path": os.fspath(image_path.resolve()),
+                        "image_id": image_path.relative_to(dataset_root).as_posix(),
+                        "diagnosis": label,
+                    }
+                )
+    if not records:
+        raise ValueError(f"No supported images found under {split_dir}")
+    missing_labels = sorted(set(range(NUM_CLASSES)) - seen_labels)
+    if missing_labels:
+        raise ValueError(f"Split {split_dir.name} is missing class directories: {missing_labels}")
+    return pd.DataFrame.from_records(records)
+
+
+def load_predefined_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+    split_paths = find_predefined_splits(args.dataset_dir)
+    dataset_root = next(iter(split_paths.values())).parent
+    splits = {
+        name: scan_classification_split(path, dataset_root)
+        for name, path in split_paths.items()
+    }
+    if args.label_column != "diagnosis":
+        splits = {
+            name: split.rename(columns={"diagnosis": args.label_column})
+            for name, split in splits.items()
+        }
+
+    all_paths: list[str] = []
+    manifest_dir = args.split_dir or (args.output_dir / "splits")
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    for name, split in splits.items():
+        paths = split["image_path"].tolist()
+        all_paths.extend(paths)
+        split.to_csv(manifest_dir / f"{name}.csv", index=False)
+        counts = split[args.label_column].value_counts().sort_index().to_dict()
+        print(f"{name}: {len(split)} samples; {counts}")
+    if len(all_paths) != len(set(all_paths)):
+        raise ValueError("The predefined train/validation/test splits contain duplicate paths")
+    return splits
+
+
+def load_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+    if args.dataset_dir is not None:
+        return load_predefined_splits(args)
+    return load_or_create_csv_splits(args)
+
+
+class FundusDataset(Dataset):
     def __init__(
         self,
         frame: pd.DataFrame,
@@ -195,6 +341,8 @@ class AptosDataset(Dataset):
         return len(self.frame)
 
     def _image_path(self, image_id: str) -> Path:
+        if "image_path" in self.frame.columns:
+            return Path(image_id)
         path = self.args.images_dir / image_id
         if not path.suffix:
             path = path.with_suffix(self.args.image_extension)
@@ -202,8 +350,12 @@ class AptosDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int, str]:
         row = self.frame.iloc[index]
-        image_id = str(row[self.args.image_column])
-        path = self._image_path(image_id)
+        if "image_path" in self.frame.columns:
+            path = Path(str(row["image_path"]))
+            image_id = str(row["image_id"])
+        else:
+            image_id = str(row[self.args.image_column])
+            path = self._image_path(image_id)
         image_bgr = cv2.imread(os.fspath(path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             raise FileNotFoundError(f"Could not read image: {path}")
@@ -592,12 +744,12 @@ def main() -> None:
     print(f"GPU: {torch.cuda.get_device_name(0)} ({memory_gb:.1f} GB)")
     amp_enabled = not args.no_amp
 
-    splits = load_or_create_splits(args)
+    splits = load_splits(args)
     train_transform, eval_transform = build_transforms(args.image_size)
     datasets = {
-        "train": AptosDataset(splits["train"], args, train_transform),
-        "val": AptosDataset(splits["val"], args, eval_transform),
-        "test": AptosDataset(splits["test"], args, eval_transform),
+        "train": FundusDataset(splits["train"], args, train_transform),
+        "val": FundusDataset(splits["val"], args, eval_transform),
+        "test": FundusDataset(splits["test"], args, eval_transform),
     }
     train_labels = splits["train"][args.label_column].astype(int).tolist()
     sampler = build_sampler(train_labels) if args.balance == "sampler" else None
