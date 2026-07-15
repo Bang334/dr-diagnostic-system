@@ -21,7 +21,7 @@ class ColabNotebookDownloadTests(unittest.TestCase):
         clone_source = "".join(notebook["cells"][6]["source"])
         source = "".join(notebook["cells"][12]["source"])
         train_source = "".join(notebook["cells"][16]["source"])
-        self.assertIn('feat/merged-dataset-training', clone_source)
+        self.assertIn('feat/limited-grade-sampling', clone_source)
         self.assertIn("sehastrajits/fundus-aptosddridirdeyepacsmessidor", source)
         self.assertIn('["datasets", "download"', source)
         self.assertIn("subprocess.run", source)
@@ -31,6 +31,7 @@ class ColabNotebookDownloadTests(unittest.TestCase):
         self.assertIn("find_predefined_splits", source)
         self.assertNotIn("split_names = ('train', 'validation', 'test')", source)
         self.assertIn('"--dataset-dir"', train_source)
+        self.assertIn('"--max-train-images-per-grade"', train_source)
         self.assertNotIn('"--images-dir"', train_source)
 
     def test_download_cell_accepts_kaggle_val_directory(self):

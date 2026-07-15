@@ -45,22 +45,41 @@ class PredefinedSplitTests(unittest.TestCase):
                 for grade in range(5):
                     class_dir = dataset_dir / "split_dataset" / split_name / str(grade)
                     class_dir.mkdir(parents=True, exist_ok=True)
-                    (class_dir / f"sample-{split_name}-{grade}.jpg").write_bytes(b"image")
+                    sample_count = 3 if split_name == "train" else 1
+                    for index in range(sample_count):
+                        (class_dir / f"sample-{split_name}-{grade}-{index}.jpg").write_bytes(
+                            b"image"
+                        )
 
             args = SimpleNamespace(
                 dataset_dir=dataset_dir,
                 output_dir=root / "run",
                 split_dir=None,
                 label_column="diagnosis",
+                max_train_images_per_grade=2,
+                seed=17,
             )
             splits = load_predefined_splits(args)
 
             self.assertEqual(set(splits), {"train", "val", "test"})
-            for split in splits.values():
+            self.assertEqual(len(splits["train"]), 10)
+            self.assertEqual(
+                splits["train"]["diagnosis"].value_counts().sort_index().to_dict(),
+                {grade: 2 for grade in range(5)},
+            )
+            for split in (splits["val"], splits["test"]):
                 self.assertEqual(len(split), 5)
                 self.assertEqual(sorted(split["diagnosis"].tolist()), list(range(5)))
                 self.assertTrue(split["image_id"].str.endswith(".jpg").all())
             self.assertTrue((root / "run" / "splits" / "val.csv").is_file())
+            saved_train = (root / "run" / "splits" / "train.csv").read_text()
+
+            repeated = load_predefined_splits(args)
+            self.assertEqual(saved_train, (root / "run" / "splits" / "train.csv").read_text())
+            self.assertEqual(
+                splits["train"]["image_id"].tolist(),
+                repeated["train"]["image_id"].tolist(),
+            )
 
 
 if __name__ == "__main__":

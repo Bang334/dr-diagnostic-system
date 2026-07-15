@@ -22,7 +22,7 @@ Grades are `0=No DR`, `1=Mild`, `2=Moderate`, `3=Severe`, and
 ## Colab setup
 
 Use the supplied `DR_Training_Colab.ipynb`. It checks out
-`feat/merged-dataset-training`, downloads the Kaggle dataset, stores checkpoints
+`feat/limited-grade-sampling`, downloads the Kaggle dataset, stores checkpoints
 on Drive, and can resume from `checkpoint-last.pth` after a runtime reset.
 
 Create these private Colab Secrets and grant the notebook access:
@@ -34,8 +34,10 @@ Create these private Colab Secrets and grant the notebook access:
 Never paste either token into a notebook cell or commit one to Git. When Colab
 Secrets are unavailable, the notebook uses a hidden session-only prompt.
 
-On a T4, allow roughly 10–30 minutes for the 10.9 GB download and 2–4 days for
-30 RETFound epochs. Actual time depends on Colab storage and GPU allocation.
+The notebook trains on at most 500 images from each grade (2,500 training
+images total) so the pipeline can be validated before committing to a full-data
+run. Validation and test remain unchanged to preserve meaningful evaluation.
+The sample is deterministic for a given `--seed`.
 
 ## Command-line setup
 
@@ -62,11 +64,15 @@ python -m ai.grading.train \
   --accum-steps 8 \
   --freeze-epochs 3 \
   --epochs 30 \
+  --max-train-images-per-grade 500 \
   --loss ce \
   --balance none
 ```
 
-The merged training set is balanced, so the baseline uses `--balance none`.
+The capped training set is balanced when every grade has at least 500 images,
+so the baseline uses `--balance none`. Set
+`--max-train-images-per-grade 0` only when intentionally returning to the full
+training set.
 Use `--balance sampler` only for an intentional ablation. Resume with the same
 arguments plus:
 
@@ -100,6 +106,7 @@ python -m ai.grading.train \
   --image-size 384 \
   --batch-size 8 \
   --accum-steps 2 \
+  --max-train-images-per-grade 500 \
   --loss ce \
   --balance none
 ```
