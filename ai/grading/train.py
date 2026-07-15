@@ -104,24 +104,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--balance",
         choices=("none", "effective", "sampler"),
-        default="effective",
+        default="none",
         help="Use only one rebalancing method per experiment",
     )
     parser.add_argument("--effective-beta", type=float, default=0.9999)
 
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=18)
     parser.add_argument("--freeze-epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--accum-steps", type=int, default=8)
-    parser.add_argument("--head-lr", type=float, default=1e-4)
-    parser.add_argument("--backbone-lr", type=float, default=1e-5)
-    parser.add_argument("--min-lr", type=float, default=1e-6)
+    parser.add_argument("--head-lr", type=float, default=5e-5)
+    parser.add_argument("--backbone-lr", type=float, default=5e-6)
+    parser.add_argument("--min-lr", type=float, default=5e-7)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-size", type=float, default=0.15)
     parser.add_argument("--test-size", type=float, default=0.15)
-    parser.add_argument("--patience", type=int, default=7)
+    parser.add_argument("--patience", type=int, default=4)
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument(
         "--eval-only",

@@ -2,11 +2,34 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 
-from ai.grading.train import load_predefined_splits, resize_pos_embed_for_model
+from ai.grading.train import load_predefined_splits, parse_args, resize_pos_embed_for_model
+
+
+class TrainingArgumentTests(unittest.TestCase):
+    def test_uses_tuned_retfound_defaults(self):
+        argv = [
+            "train.py",
+            "--dataset-dir",
+            "dataset",
+            "--output-dir",
+            "run",
+        ]
+        with patch("sys.argv", argv):
+            args = parse_args()
+
+        self.assertEqual(args.epochs, 18)
+        self.assertEqual(args.patience, 4)
+        self.assertEqual(args.freeze_epochs, 3)
+        self.assertEqual(args.head_lr, 5e-5)
+        self.assertEqual(args.backbone_lr, 5e-6)
+        self.assertEqual(args.min_lr, 5e-7)
+        self.assertEqual(args.weight_decay, 0.05)
+        self.assertEqual(args.balance, "none")
 
 
 class _PatchEmbed(nn.Module):

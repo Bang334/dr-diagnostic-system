@@ -34,8 +34,8 @@ Create these private Colab Secrets and grant the notebook access:
 Never paste either token into a notebook cell or commit one to Git. When Colab
 Secrets are unavailable, the notebook uses a hidden session-only prompt.
 
-On a T4, allow roughly 10–30 minutes for the 10.9 GB download and 2–4 days for
-30 RETFound epochs. Actual time depends on Colab storage and GPU allocation.
+On a T4, allow roughly 10–30 minutes for the 10.9 GB download and about 1–3 days
+for 18 RETFound epochs. Actual time depends on Colab storage and GPU allocation.
 
 ## Command-line setup
 
@@ -61,7 +61,12 @@ python -m ai.grading.train \
   --batch-size 2 \
   --accum-steps 8 \
   --freeze-epochs 3 \
-  --epochs 30 \
+  --epochs 18 \
+  --patience 4 \
+  --head-lr 5e-5 \
+  --backbone-lr 5e-6 \
+  --min-lr 5e-7 \
+  --weight-decay 0.05 \
   --loss ce \
   --balance none
 ```
