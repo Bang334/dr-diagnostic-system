@@ -13,10 +13,14 @@
 
 ## Semi-supervised và Few-shot
 
-Mã nghiên cứu đã được chuyển vào `ai/semi_supervised` và hiện mới gồm:
+Mã nghiên cứu trong `ai/semi_supervised` hiện gồm:
 
-- Pseudo-labeling scaffold.
-- ProtoNet demo dùng tensor giả lập.
+- Pseudo-labeling dùng best checkpoint RETFound, ảnh ngoài chưa nhãn và
+  validation QWK để chọn model.
+- ProtoNet episodic trên ảnh thật, khởi tạo encoder từ best checkpoint RETFound.
+- Notebook Colab chọn checkpoint/dataset từ Google Drive và lưu run riêng.
+
+Hai pipeline giữ kín test split và chưa phải model production.
 
 Không tìm thấy dataset, checkpoint, split, log, confidence interval hoặc bảng
 so sánh supervised baseline. Vì vậy **không được ghi là đã thử nghiệm thành

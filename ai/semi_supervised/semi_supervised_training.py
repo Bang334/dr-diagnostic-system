@@ -1,196 +1,417 @@
-"""
-PyTorch Implementation of Pseudo-Labeling for Semi-supervised Diabetic Retinopathy Grading.
-Research scaffold migrated into dr-diagnostic-system.
-This script is not part of clinical inference and does not prove effectiveness.
+"""Continue a RETFound grading checkpoint with confidence-filtered pseudo-labels.
+
+Only the fixed training split and an external unlabeled image directory are
+used for optimization. The validation split selects checkpoints; the test
+split is discovered only to enforce separation and is never evaluated here.
 """
 
-import os
+from __future__ import annotations
+
 import argparse
-from PIL import Image
+import json
+import math
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-import torchvision.models as models
+import torch.nn.functional as F
+from torch.utils.data import ConcatDataset, DataLoader
+from tqdm.auto import tqdm
 
-# 1. DATASET DEFINITIONS
-class LabeledDRDataset(Dataset):
-    """Dataset for labeled fundus images (0-4)"""
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.image_paths = []
-        self.labels = []
-        
-        # Scan class subfolders (class_0 to class_4)
-        for class_idx in range(5):
-            class_dir = os.path.join(root_dir, f"class_{class_idx}")
-            if os.path.exists(class_dir):
-                for fname in os.listdir(class_dir):
-                    if fname.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        self.image_paths.append(os.path.join(class_dir, fname))
-                        self.labels.append(class_idx)
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        image = Image.open(img_path).convert('RGB')
-        label = self.labels[idx]
-        
-        if self.transform:
-            image = self.transform(image)
-            
-        return image, label, img_path
+from ai.grading.train import (
+    FundusDataset,
+    build_transforms,
+    calculate_metrics,
+    create_scaler,
+    evaluate,
+    is_head_parameter,
+)
+from ai.semi_supervised.research_utils import (
+    PseudoLabeledFundusDataset,
+    UnlabeledFundusDataset,
+    WeightedLabeledDataset,
+    assert_unlabeled_is_external,
+    checkpoint_args_with_metadata,
+    discover_images,
+    load_grading_checkpoint,
+    load_split_frames,
+    prepare_fresh_output_dir,
+    save_classifier_checkpoint,
+    seed_everything,
+)
 
 
-class UnlabeledDRDataset(Dataset):
-    """Dataset for unlabeled fundus images"""
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.image_paths = []
-        
-        if os.path.exists(root_dir):
-            for fname in os.listdir(root_dir):
-                if fname.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    self.image_paths.append(os.path.join(root_dir, fname))
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument(
+        "--dataset-dir",
+        required=True,
+        type=Path,
+        help="Labeled dataset containing fixed train/val/test directories",
+    )
+    parser.add_argument(
+        "--unlabeled-dir",
+        required=True,
+        type=Path,
+        help="External directory containing genuinely unlabeled fundus images",
+    )
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--accum-steps", type=int, default=8)
+    parser.add_argument("--head-lr", type=float, default=1e-5)
+    parser.add_argument("--backbone-lr", type=float, default=1e-6)
+    parser.add_argument("--min-lr", type=float, default=1e-7)
+    parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--threshold", type=float, default=0.95)
+    parser.add_argument("--pseudo-weight", type=float, default=0.25)
+    parser.add_argument(
+        "--max-pseudo-per-class",
+        type=int,
+        default=2000,
+        help="Keep the most confident N images per class; use 0 for no cap",
+    )
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--enhance", action="store_true")
+    parser.add_argument("--no-amp", action="store_true")
+    return parser.parse_args(argv)
 
-    def __len__(self):
-        return len(self.image_paths)
 
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        image = Image.open(img_path).convert('RGB')
-        
-        if self.transform:
-            image = self.transform(image)
-            
-        return image, img_path
-
-
-# 2. MODEL DEFINITIONS
-def get_model(num_classes=5):
-    # Use ResNet-18 as feature extractor backbone
-    model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
+def validate_args(args: argparse.Namespace) -> None:
+    if not 0.5 <= args.threshold <= 1.0:
+        raise ValueError("--threshold must be between 0.5 and 1.0")
+    if not 0.0 < args.pseudo_weight <= 1.0:
+        raise ValueError("--pseudo-weight must be in (0, 1]")
+    if args.epochs < 1 or args.patience < 1:
+        raise ValueError("--epochs and --patience must be positive")
+    if args.batch_size < 1 or args.accum_steps < 1:
+        raise ValueError("--batch-size and --accum-steps must be positive")
+    if args.max_pseudo_per_class < 0:
+        raise ValueError("--max-pseudo-per-class cannot be negative")
+    output_checkpoint = (args.output_dir / "checkpoint-best.pth").resolve()
+    if output_checkpoint == args.checkpoint.expanduser().resolve():
+        raise ValueError(
+            "--output-dir would overwrite the parent checkpoint; choose a new run directory"
+        )
 
 
-# 3. SEMI-SUPERVISED TRAINING LOOP
-def train_pseudo_labeling(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"--> Running training on device: {device}")
+def _dataset_args(saved_args: argparse.Namespace, args: argparse.Namespace) -> argparse.Namespace:
+    values = dict(vars(saved_args))
+    values.update(
+        {
+            "dataset_dir": args.dataset_dir,
+            "images_dir": None,
+            "labels_csv": None,
+            "image_column": "id_code",
+            "label_column": "diagnosis",
+            "image_extension": ".png",
+            "enhance": args.enhance,
+        }
+    )
+    return argparse.Namespace(**values)
 
-    # Standard Transforms
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
 
-    # Initialize DataLoaders
-    print("--> Loading dataset...")
-    labeled_dataset = LabeledDRDataset(args.labeled_dir, transform=transform)
-    unlabeled_dataset = UnlabeledDRDataset(args.unlabeled_dir, transform=transform)
-    
-    if len(labeled_dataset) == 0:
-        print("⚠ Labeled data directory is empty or does not exist. Please prepare your dataset.")
-        return
+@torch.no_grad()
+def generate_pseudo_labels(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    threshold: float,
+    max_per_class: int,
+    amp_enabled: bool,
+) -> pd.DataFrame:
+    model.eval()
+    records: List[Dict[str, Any]] = []
+    for images, paths in tqdm(loader, desc="pseudo-label", leave=False):
+        images = images.to(device, non_blocking=True)
+        with torch.amp.autocast("cuda", enabled=amp_enabled):
+            probabilities = torch.softmax(model(images), dim=1)
+        confidence, labels = probabilities.max(dim=1)
+        for path, label, score in zip(paths, labels.cpu(), confidence.cpu()):
+            if float(score) >= threshold:
+                records.append(
+                    {
+                        "image_path": os.fspath(Path(path).resolve()),
+                        "pseudo_label": int(label),
+                        "confidence": float(score),
+                    }
+                )
 
-    labeled_loader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True)
-    unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=args.batch_size, shuffle=False)
+    frame = pd.DataFrame.from_records(
+        records, columns=["image_path", "pseudo_label", "confidence"]
+    )
+    if frame.empty:
+        return frame
+    frame = frame.sort_values("confidence", ascending=False)
+    if max_per_class > 0:
+        frame = frame.groupby("pseudo_label", group_keys=False).head(max_per_class)
+    return frame.sort_values(["pseudo_label", "confidence"], ascending=[True, False]).reset_index(
+        drop=True
+    )
 
-    model = get_model(num_classes=5).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    # Step 1: Warm-up training on labeled data
-    print("--> Step 1: Warm-up training on labeled data...")
-    for epoch in range(args.warmup_epochs):
-        model.train()
-        total_loss = 0.0
-        for images, labels, _ in labeled_loader:
-            images, labels = images.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        print(f"   Epoch Warm-up [{epoch+1}/{args.warmup_epochs}] - Loss: {total_loss/len(labeled_loader):.4f}")
+def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.Optimizer:
+    head, backbone = [], []
+    for name, parameter in model.named_parameters():
+        parameter.requires_grad = True
+        (head if is_head_parameter(name) else backbone).append(parameter)
+    return torch.optim.AdamW(
+        [
+            {"params": backbone, "lr": args.backbone_lr},
+            {"params": head, "lr": args.head_lr},
+        ],
+        weight_decay=args.weight_decay,
+    )
 
-    # Step 2: Semi-supervised training with Pseudo-Labeling
-    print("--> Step 2: Semi-supervised training with Pseudo-Labeling...")
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: Any,
+    device: torch.device,
+    *,
+    accum_steps: int,
+    amp_enabled: bool,
+) -> float:
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    total_weighted_loss = 0.0
+    total_weight = 0.0
+    for step, (images, labels, _, sample_weights) in enumerate(
+        tqdm(loader, desc="semi-train", leave=False)
+    ):
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        sample_weights = sample_weights.to(device, dtype=torch.float32, non_blocking=True)
+        with torch.amp.autocast("cuda", enabled=amp_enabled):
+            logits = model(images)
+            per_sample = F.cross_entropy(
+                logits,
+                labels,
+                reduction="none",
+                label_smoothing=0.05,
+            )
+            loss = (per_sample * sample_weights).sum() / sample_weights.sum().clamp_min(1e-8)
+        scaler.scale(loss / accum_steps).backward()
+        should_step = (step + 1) % accum_steps == 0 or step + 1 == len(loader)
+        if should_step:
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+        total_weighted_loss += float((per_sample.detach() * sample_weights).sum())
+        total_weight += float(sample_weights.sum())
+    return total_weighted_loss / max(total_weight, 1e-8)
+
+
+def run(args: argparse.Namespace) -> None:
+    validate_args(args)
+    args.output_dir = prepare_fresh_output_dir(args.output_dir)
+    seed_everything(args.seed)
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU is required for RETFound semi-supervised training")
+    device = torch.device("cuda")
+    amp_enabled = not args.no_amp
+
+    bundle = load_grading_checkpoint(args.checkpoint, device, require_ce=True)
+    model, saved_args = bundle.model, bundle.saved_args
+    image_size = int(getattr(saved_args, "image_size", 224))
+    frames, _ = load_split_frames(args.dataset_dir)
+    unlabeled_paths = discover_images(args.unlabeled_dir)
+    assert_unlabeled_is_external(unlabeled_paths, frames)
+    train_transform, eval_transform = build_transforms(image_size)
+    data_args = _dataset_args(saved_args, args)
+
+    train_dataset = FundusDataset(frames["train"], data_args, train_transform)
+    val_dataset = FundusDataset(frames["val"], data_args, eval_transform)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+    unlabeled_dataset = UnlabeledFundusDataset(
+        unlabeled_paths,
+        image_size,
+        eval_transform,
+        enhance=args.enhance,
+    )
+    unlabeled_loader = DataLoader(
+        unlabeled_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+
+    print(f"Labeled train images: {len(train_dataset):,}")
+    print(f"Validation images: {len(val_dataset):,}")
+    print(f"External unlabeled images: {len(unlabeled_dataset):,}")
+    print("Held-out test split is not loaded into a DataLoader.")
+
+    pseudo_frame = generate_pseudo_labels(
+        model,
+        unlabeled_loader,
+        device,
+        threshold=args.threshold,
+        max_per_class=args.max_pseudo_per_class,
+        amp_enabled=amp_enabled,
+    )
+    if pseudo_frame.empty:
+        raise RuntimeError(
+            "No pseudo-label passed the confidence threshold; lower --threshold only "
+            "after inspecting model calibration and the unlabeled domain"
+        )
+    pseudo_frame.to_csv(args.output_dir / "pseudo_labels.csv", index=False)
+    counts = pseudo_frame["pseudo_label"].value_counts().sort_index().to_dict()
+    print(f"Accepted pseudo-labels: {len(pseudo_frame):,}; per class: {counts}")
+
+    pseudo_dataset = PseudoLabeledFundusDataset(
+        pseudo_frame,
+        image_size,
+        train_transform,
+        pseudo_weight=args.pseudo_weight,
+        enhance=args.enhance,
+    )
+    combined_dataset = ConcatDataset(
+        [WeightedLabeledDataset(train_dataset), pseudo_dataset]
+    )
+    train_loader = DataLoader(
+        combined_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    baseline_loss, targets, predictions, _ = evaluate(
+        model, val_loader, criterion, device, "ce", amp_enabled
+    )
+    baseline_metrics = calculate_metrics(targets, predictions)
+    best_qwk = float(baseline_metrics["qwk"])
+    if not math.isfinite(best_qwk):
+        raise RuntimeError("Parent checkpoint produced a non-finite validation QWK")
+    print(f"Parent checkpoint validation QWK: {best_qwk:.6f}")
+
+    metadata = {
+        "research_method": "pseudo_labeling",
+        "parent_checkpoint": os.fspath(args.checkpoint.resolve()),
+        "pseudo_threshold": args.threshold,
+        "pseudo_weight": args.pseudo_weight,
+        "unlabeled_dir": os.fspath(args.unlabeled_dir.resolve()),
+        "semi_supervised_args": {
+            key: os.fspath(value) if isinstance(value, Path) else value
+            for key, value in vars(args).items()
+        },
+    }
+    checkpoint_args = checkpoint_args_with_metadata(saved_args, metadata)
+    save_classifier_checkpoint(
+        args.output_dir / "checkpoint-best.pth",
+        model,
+        checkpoint_args,
+        epoch=-1,
+        best_qwk=best_qwk,
+        parent_checkpoint=args.checkpoint,
+    )
+
+    optimizer = build_optimizer(model, args)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(args.epochs - 1, 1),
+        eta_min=args.min_lr,
+    )
+    scaler = create_scaler(amp_enabled)
+    history_path = args.output_dir / "history.jsonl"
+    stale_epochs = 0
+    best_epoch = -1
+
     for epoch in range(args.epochs):
-        model.eval()
-        pseudo_labeled_samples = []
-        
-        # Generate pseudo-labels for unlabeled data
-        print("   Generating pseudo-labels for unlabeled dataset...")
-        with torch.no_grad():
-            for images, paths in unlabeled_loader:
-                images = images.to(device)
-                outputs = model(images)
-                probabilities = torch.softmax(outputs, dim=1)
-                max_probs, targets = torch.max(probabilities, dim=1)
-                
-                # Filter predictions with high confidence
-                for idx in range(images.size(0)):
-                    if max_probs[idx].item() >= args.threshold:
-                        pseudo_labeled_samples.append((images[idx].cpu(), targets[idx].item()))
-                        
-        print(f"   Found {len(pseudo_labeled_samples)} unlabeled images with confidence >= {args.threshold:.2f}")
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            accum_steps=args.accum_steps,
+            amp_enabled=amp_enabled,
+        )
+        val_loss, targets, predictions, _ = evaluate(
+            model, val_loader, criterion, device, "ce", amp_enabled
+        )
+        metrics = calculate_metrics(targets, predictions)
+        record = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "baseline_val_loss": baseline_loss,
+            **metrics,
+        }
+        print(json.dumps(record, ensure_ascii=False))
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        # Retrain model on combined dataset
-        model.train()
-        total_loss = 0.0
-        
-        # Labeled loss
-        for images, labels, _ in labeled_loader:
-            images, labels = images.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            
-        # Pseudo-labeled loss
-        if len(pseudo_labeled_samples) > 0:
-            pseudo_loader = DataLoader(pseudo_labeled_samples, batch_size=args.batch_size, shuffle=True)
-            for images, labels in pseudo_loader:
-                images, labels = images.to(device), labels.to(device)
-                optimizer.zero_grad()
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-                
-        print(f"   Epoch Semi-Supervised [{epoch+1}/{args.epochs}] - Loss: {total_loss:.4f}")
+        current_qwk = float(metrics["qwk"])
+        if not math.isfinite(current_qwk):
+            raise RuntimeError("Semi-supervised model produced a non-finite validation QWK")
+        improved = current_qwk > best_qwk
+        if improved:
+            best_qwk = current_qwk
+            best_epoch = epoch
+            stale_epochs = 0
+            save_classifier_checkpoint(
+                args.output_dir / "checkpoint-best.pth",
+                model,
+                checkpoint_args,
+                epoch=epoch,
+                best_qwk=best_qwk,
+                parent_checkpoint=args.checkpoint,
+            )
+        else:
+            stale_epochs += 1
+        save_classifier_checkpoint(
+            args.output_dir / "checkpoint-last.pth",
+            model,
+            checkpoint_args,
+            epoch=epoch,
+            best_qwk=best_qwk,
+            parent_checkpoint=args.checkpoint,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+        scheduler.step()
+        if stale_epochs >= args.patience:
+            print(f"Early stopping after {stale_epochs} epochs without QWK improvement")
+            break
 
-    print("--> Semi-supervised training completed successfully!")
-    output_dir = os.path.dirname(args.output)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    torch.save(model.state_dict(), args.output)
-    print(f"--> Research checkpoint saved at: {args.output}")
-    print("--> This checkpoint must pass held-out validation and clinical review before deployment.")
+    summary = {
+        "parent_qwk": float(baseline_metrics["qwk"]),
+        "best_qwk": best_qwk,
+        "best_epoch": best_epoch,
+        "accepted_pseudo_labels": len(pseudo_frame),
+        "pseudo_labels_per_class": {str(k): int(v) for k, v in counts.items()},
+        "mean_pseudo_confidence": float(pseudo_frame["confidence"].mean()),
+        "test_split_used": False,
+    }
+    with (args.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+def main() -> None:
+    run(parse_args())
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pseudo-labeling DR Training")
-    parser.add_argument("--labeled_dir", type=str, default="data/dr_semi_supervised/labeled", help="Path to labeled data")
-    parser.add_argument("--unlabeled_dir", type=str, default="data/dr_semi_supervised/unlabeled", help="Path to unlabeled data")
-    parser.add_argument("--warmup_epochs", type=int, default=2, help="Number of warmup epochs on labeled data")
-    parser.add_argument("--epochs", type=int, default=5, help="Number of semi-supervised epochs")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--threshold", type=float, default=0.95, help="Confidence threshold for pseudo-labeling")
-    parser.add_argument("--output", type=str, default="ai/weights/pseudo_labeled_model.pth", help="Research checkpoint output path")
-    
-    args = parser.parse_args()
-    train_pseudo_labeling(args)
+    main()

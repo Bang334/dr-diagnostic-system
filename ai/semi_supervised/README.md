@@ -1,42 +1,104 @@
-# Semi-supervised / Few-shot — trạng thái nghiên cứu
+# Semi-supervised và few-shot với RETFound
 
-Mã scaffold đã được chuyển vào chính thư mục này nhưng chưa được đưa vào
-inference của hệ thống chính. Lý do: workspace không có dataset,
-checkpoint, patient-level split hoặc báo cáo metric trên test set giữ kín.
+Hai pipeline trong thư mục này là thí nghiệm nghiên cứu dùng lại
+`checkpoint-best.pth` của mô hình grading RETFound. Chúng không tự tải backbone
+mới và không được đưa thẳng vào inference lâm sàng.
 
-- `semi_supervised_training.py`: pseudo-labeling scaffold; chưa có supervised
-  baseline, calibration hoặc kết quả trên ảnh thật.
-- `few_shot_demo.py`: ProtoNet chạy trên tensor giả lập; không phải thí nghiệm
-  few-shot y khoa.
+Notebook Colab: `Semi_Supervised_Few_Shot_Colab.ipynb`.
 
-Tiêu chí nghiệm thu và tích hợp model được ghi tại
-`docs/tv3_integration_status.md`. Chỉ model đã validation và có version mới được
-triển khai sau `AI_GRADING_SERVICE_URL`/`AI_SEGMENTATION_SERVICE_URL`.
+## Dữ liệu được phép sử dụng
 
-Không sao chép checkpoint thử nghiệm vào backend và không tự học lại từ dữ
-liệu bệnh nhân production. Hai script được giữ để tái lập nghiên cứu, không phải
-model production.
+Dataset có nhãn phải giữ nguyên cấu trúc split:
 
-## Môi trường nghiên cứu
+```text
+fundus_dataset/
+├── train/       # hoặc training/
+│   ├── 0/ ... 4/
+├── validation/  # hoặc val/
+│   ├── 0/ ... 4/
+└── test/
+    ├── 0/ ... 4/
+```
+
+- Semi-supervised chỉ tối ưu trên `train` và ảnh ngoài chưa có nhãn.
+- Few-shot lấy episode huấn luyện từ `train` và episode chọn model từ `val`.
+- `test` chỉ được dò để kiểm tra tách biệt; hai script không tạo DataLoader cho
+  test và không báo metric test.
+- Thư mục ảnh chưa nhãn phải là nguồn ngoài, không được trỏ vào `train`, `val`
+  hoặc `test`. Script chặn các đường dẫn bị trùng.
+- Nếu dữ liệu có hai mắt của cùng bệnh nhân, split phải được tạo theo bệnh nhân
+  trước khi chạy các thí nghiệm này.
+
+## Cài dependencies
 
 ```powershell
+pip install -r ai/grading/requirements-train.txt
 pip install -r ai/semi_supervised/requirements-research.txt
 ```
 
-## Cấu trúc dữ liệu pseudo-labeling
+## Pseudo-labeling
 
-```text
-data/dr_semi_supervised/
-├── labeled/class_0 ... class_4/
-└── unlabeled/
-```
+Pipeline nạp checkpoint CE tốt nhất, đánh pseudo-label một lần bằng transform
+validation, giữ ảnh có confidence từ `0.95`, giới hạn số ảnh mỗi lớp, rồi
+fine-tune bằng:
 
-Chạy scaffold:
+- ảnh có nhãn với trọng số `1.0`;
+- ảnh pseudo-label với trọng số mặc định `0.25 × confidence`;
+- LR head `1e-5`, LR backbone `1e-6`;
+- chọn checkpoint theo QWK validation.
 
 ```powershell
-python ai/semi_supervised/semi_supervised_training.py --labeled_dir data/dr_semi_supervised/labeled --unlabeled_dir data/dr_semi_supervised/unlabeled
-python ai/semi_supervised/few_shot_demo.py
+python -m ai.semi_supervised.semi_supervised_training `
+  --checkpoint D:\checkpoints\checkpoint-best.pth `
+  --dataset-dir D:\data\fundus_merged `
+  --unlabeled-dir D:\data\fundus_unlabeled `
+  --output-dir D:\runs\retfound_pseudo_v1
 ```
 
-Lệnh thứ hai chỉ chạy tensor giả lập. Không công bố accuracy của demo như kết
-quả trên ảnh võng mạc.
+Các artifact chính:
+
+- `pseudo_labels.csv`: đường dẫn, nhãn giả và confidence để audit;
+- `checkpoint-best.pth`: luôn ít nhất bằng trọng số parent nếu fine-tune không
+  cải thiện QWK;
+- `checkpoint-last.pth`: có optimizer/scheduler của run nghiên cứu;
+- `history.jsonl` và `summary.json`.
+
+Nếu không ảnh nào vượt threshold, script dừng thay vì tự hạ ngưỡng. Hãy kiểm tra
+calibration và domain ảnh ngoài trước khi chọn ngưỡng thấp hơn.
+
+## Few-shot episodic training
+
+`few_shot_demo.py` nay chạy ảnh thật. RETFound là encoder, projection head mới
+được huấn luyện theo ProtoNet; mặc định chỉ block transformer cuối và các lớp
+norm của encoder được mở.
+
+```powershell
+python -m ai.semi_supervised.few_shot_demo `
+  --checkpoint D:\checkpoints\checkpoint-best.pth `
+  --dataset-dir D:\data\fundus_merged `
+  --output-dir D:\runs\retfound_fewshot_v1 `
+  --shots 5 `
+  --queries 3
+```
+
+Artifact `checkpoint-best-protonet.pth` cần support set khi inference và không
+tương thích trực tiếp với API grading năm lớp. Không sao chép artifact này vào
+`ai/weights` của production.
+
+## Chạy trên Colab/Drive
+
+Notebook sẽ:
+
+1. mount Google Drive;
+2. clone/pull đúng branch;
+3. dò các file `checkpoint-best.pth` trên Drive;
+4. cho chọn dataset split có sẵn hoặc nhập đường dẫn dataset;
+5. cho chọn thư mục/ZIP ảnh chưa nhãn khi chạy semi-supervised;
+6. lưu mỗi phương pháp vào output directory riêng trên Drive.
+
+Script từ chối output directory đã có artifact để tránh nối lẫn hai run hoặc
+ghi đè checkpoint cũ. Khi chạy lại, hãy đổi `Tên run` trong notebook.
+
+Checkpoint đầu vào phải là checkpoint CE do `ai/grading/train.py` tạo. Notebook
+không cần đăng nhập Hugging Face vì kiến trúc được dựng với `pretrained=False`
+và toàn bộ trọng số được lấy từ checkpoint Drive.

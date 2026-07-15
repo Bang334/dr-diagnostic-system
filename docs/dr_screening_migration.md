@@ -3,7 +3,7 @@
 | Nguồn cũ | Đích/thay thế trong hệ thống chính | Quyết định |
 | --- | --- | --- |
 | `ai/semi_supervised/semi_supervised_training.py` | `ai/semi_supervised/semi_supervised_training.py` | Đã chuyển và sửa output checkpoint. |
-| `ai/semi_supervised/few_shot_demo.py` | `ai/semi_supervised/few_shot_demo.py` | Đã chuyển, ghi rõ dữ liệu giả lập. |
+| `ai/semi_supervised/few_shot_demo.py` | `ai/semi_supervised/few_shot_demo.py` | Đã thay demo giả lập bằng episodic training trên ảnh thật, khởi tạo từ RETFound. |
 | `docs/semi_supervised_research.md` | `docs/semi_supervised_research.md` | Đã chuyển và bỏ tuyên bố “tốt nhất” chưa có bằng chứng. |
 | `docs/clinical_rules_traceability.md` | `docs/clinical_rules_traceability.md` | Viết lại theo module/rule mới. |
 | `clinical/core/*`, `clinical/services/*` | `backend/app/clinical/*` | Đã thay thế bằng module tích hợp; không sao chép code legacy. |
