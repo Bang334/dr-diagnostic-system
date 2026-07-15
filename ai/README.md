@@ -11,6 +11,7 @@ Thư mục này chứa mã nguồn phục vụ việc nghiên cứu, tiền xử
   * **CLAHE (Contrast Limited Adaptive Histogram Equalization):** Cân bằng độ tương phản cục bộ để làm rõ các vi phình mạch và vùng xuất huyết mờ.
   * **Ben Graham Preprocessing:** Kỹ thuật loại bỏ nhiễu ánh sáng nền bằng cách trừ ảnh mờ Gaussian và chuẩn hóa kích thước hình tròn của võng mạc.
 * `/grading/`: Huấn luyện mô hình phân loại 5 mức độ bệnh lý võng mạc tiểu đường (No DR, Mild, Moderate, Severe, Proliferative DR) theo thang ICDR sử dụng các kiến trúc:
+  * **RETFound-DINOv2 ViT-L** (primary PyTorch `.pth` model)
   * **EfficientNet (B0 - B4)**
   * **ResNet (50, 101)**
   * **ConvNeXt**

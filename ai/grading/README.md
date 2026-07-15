@@ -1,13 +1,16 @@
-# DR grading training
+# DR grading
 
-`train.py` fine-tunes a five-grade diabetic-retinopathy classifier on the
-[merged Fundus dataset](https://www.kaggle.com/datasets/sehastrajits/fundus-aptosddridirdeyepacsmessidor),
-which combines APTOS, DDR, IDRiD, EyePACS and Messidor images. The dataset is
-about 10.9 GB and already provides `train`, `validation` and `test` directories
-under `split_dataset`; the loader preserves these splits instead of randomly
-splitting them again.
+This module trains and serves a five-grade ICDR diabetic-retinopathy classifier:
 
-Expected layout:
+`0=No DR`, `1=Mild NPDR`, `2=Moderate NPDR`, `3=Severe NPDR`, and
+`4=Proliferative DR`.
+
+The primary model is RETFound-DINOv2 ViT-L. The legacy Keras EfficientNet-B3
+checkpoint remains deployable through the same predictor interface.
+
+## Dataset layout
+
+The merged APTOS, DDR, IDRiD, EyePACS and Messidor dataset is expected as:
 
 ```text
 split_dataset/
@@ -16,112 +19,110 @@ split_dataset/
 └── test/{0,1,2,3,4}/*.jpg
 ```
 
-Grades are `0=No DR`, `1=Mild`, `2=Moderate`, `3=Severe`, and
-`4=Proliferative DR`.
+Before sampling or training, the pipeline audits the complete dataset for:
 
-## Colab setup
+- exact file and decoded-pixel duplicates;
+- perceptually similar images;
+- known patient IDs appearing in multiple splits;
+- conflicting labels inside duplicate clusters;
+- source and patient-ID coverage.
 
-Use the supplied `DR_Training_Colab.ipynb`. It checks out
-`feat/limited-grade-sampling`, downloads the Kaggle dataset, stores checkpoints
-on Drive, and can resume from `checkpoint-last.pth` after a runtime reset.
+Reports are written to `<output-dir>/audit`. The default `--leakage-policy
+error` stops training for exact cross-split duplicates, patient overlap or
+conflicting duplicate labels. Perceptual matches are reported for manual review.
 
-Create these private Colab Secrets and grant the notebook access:
+Run the audit without loading a GPU model:
 
-- `KAGGLE_API_TOKEN`: generated from Kaggle Settings → API;
-- `HF_TOKEN`: a Hugging Face read token with approved access to
-  `YukunZhou/RETFound_dinov2_meh`.
+```bash
+python -m ai.grading.train \
+  --dataset-dir /content/fundus_merged/split_dataset \
+  --output-dir /content/drive/MyDrive/dr_runs/data_audit \
+  --audit-only
+```
 
-Never paste either token into a notebook cell or commit one to Git. When Colab
-Secrets are unavailable, the notebook uses a hidden session-only prompt.
+## Recommended baseline
 
-The notebook uses at most 1,000 images in total from each grade, divided into
-70% train, 15% validation and 15% test. With five complete grades this gives up
-to 3,500 training images and 750 images in each evaluation split. Each sample
-is deterministic for a given `--seed`, and predefined split boundaries remain
-intact.
-
-## Command-line setup
-
-From the project root:
+Install the pinned training environment and authenticate with Hugging Face:
 
 ```bash
 pip install -r ai/grading/requirements-train.txt
-python -m ai.grading.download_data --output-dir /content/fundus_merged
+huggingface-cli login
 ```
 
-The downloader reads `KAGGLE_API_TOKEN` or `~/.kaggle/kaggle.json` and extracts
-the data to `/content/fundus_merged/split_dataset`.
-
-Recommended RETFound baseline:
+Train the final six ViT blocks and classifier head:
 
 ```bash
 python -m ai.grading.train \
   --dataset-dir /content/fundus_merged/split_dataset \
-  --output-dir /content/drive/MyDrive/dr_runs/retfound_merged_seed42 \
+  --output-dir /content/drive/MyDrive/dr_runs/retfound_last6_seed42 \
   --model-source retfound \
   --retfound-id RETFound_dinov2_meh \
   --image-size 224 \
+  --adaptation last_n_blocks \
+  --last-n-blocks 6 \
   --batch-size 2 \
   --accum-steps 8 \
-  --freeze-epochs 3 \
   --epochs 30 \
-  --max-images-per-grade 1000 \
-  --val-size 0.15 \
-  --test-size 0.15 \
+  --warmup-epochs 3 \
+  --peak-lr 1e-4 \
+  --layer-decay 0.75 \
+  --min-lr 1e-6 \
+  --weight-decay 0.05 \
+  --max-train-images-per-grade 700 \
+  --max-eval-images-per-grade 0 \
   --loss ce \
-  --balance none
+  --balance none \
+  --seed 42
 ```
 
-The capped training set is balanced when every grade has at least 700 training
-images, so the baseline uses `--balance none`. Set
-`--max-images-per-grade 0` only when intentionally returning to the full
-training and evaluation sets.
-Use `--balance sampler` only for an intentional ablation. Resume with the same
-arguments plus:
+`--max-eval-images-per-grade 0` keeps the complete validation and test splits.
+Model selection uses validation QWK; the test split is evaluated after training.
+
+The supported adaptation modes are:
+
+- `linear_probe`: classifier head only;
+- `last_n_blocks`: classifier, final normalization and the final N ViT blocks;
+- `full_finetune`: all parameters.
+
+For a linear probe, start with `--peak-lr 3e-4 --warmup-epochs 1`. Keep the
+same dataset manifests and seed when comparing adaptation modes.
+
+Resume requires the same model, preprocessing, manifests, adaptation, batch,
+accumulation and scheduler configuration:
 
 ```bash
---resume /content/drive/MyDrive/dr_runs/retfound_merged_seed42/checkpoint-last.pth
+--resume /content/drive/MyDrive/dr_runs/retfound_last6_seed42/checkpoint-last.pth
 ```
 
-The scanner writes immutable split manifests to `<output-dir>/splits`. Model
-selection uses validation QWK; the test split is evaluated only after training
-and selection finish.
+Legacy checkpoints without versioned metadata can load their model weights, but
+their optimizer and scheduler state are intentionally not restored.
 
-Outputs include:
+## Artifact contract
 
-- `checkpoint-best.pth` and resumable `checkpoint-last.pth`;
-- `history.jsonl`;
-- `test_metrics.json` and `test_predictions.csv`;
-- `confusion_matrix_normalized.png`;
-- `splits/train.csv`, `splits/val.csv`, and `splits/test.csv`.
+Each new `.pth` checkpoint contains:
 
-## Lightweight fallback
+- model framework, architecture, output type and class names;
+- image size, crop tolerance, enhancement flag, interpolation, mean and std;
+- adaptation and training configuration;
+- Git commit, package versions and SHA-256 of all split manifests;
+- optimizer, AMP scaler, scheduler, global update and RNG state in
+  `checkpoint-last.pth`.
 
-If RETFound does not fit the assigned GPU, keep the data and evaluation setup
-fixed and change only the backbone:
+Additional outputs include `artifact_metadata.json`, `history.jsonl`, probability
+columns in `test_predictions.csv`, macro AUROC/AUPRC, ECE, multiclass Brier
+score, a normalized confusion matrix and a reliability diagram.
+
+## Inference
+
+Select a model with environment variables:
 
 ```bash
-python -m ai.grading.train \
-  --dataset-dir /content/fundus_merged/split_dataset \
-  --output-dir /content/drive/MyDrive/dr_runs/convnext_merged_seed42 \
-  --model-source timm \
-  --model-name convnext_tiny.fb_in22k_ft_in1k \
-  --image-size 384 \
-  --batch-size 8 \
-  --accum-steps 2 \
-  --max-images-per-grade 1000 \
-  --val-size 0.15 \
-  --test-size 0.15 \
-  --loss ce \
-  --balance none
+DR_MODEL_PATH=/models/checkpoint-best.pth
+DR_MODEL_BACKEND=auto
+uvicorn ai.grading.main:app --host 0.0.0.0 --port 8001
 ```
 
-The legacy `--images-dir` plus `--labels-csv` input remains supported for older
-APTOS experiments, but it cannot be combined with `--dataset-dir`.
-
-## Preprocessing contract
-
-Training and the current Keras API share the colour-preserving crop in
-`ai.preprocessing.fundus_prep`. The default is crop + resize with RGB retained.
-If an experiment is trained with `--enhance`, deploy it with
-`DR_PREPROCESS_ENHANCE=1`; otherwise leave that variable unset.
+`auto` selects the PyTorch adapter for `.pth`/`.pt` and the legacy Keras adapter
+for `.keras`/`.h5`. PyTorch preprocessing comes exclusively from checkpoint
+metadata. `DR_PREPROCESS_ENHANCE` is retained only for legacy Keras artifacts
+that have no embedded preprocessing contract.

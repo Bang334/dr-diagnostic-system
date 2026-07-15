@@ -1,23 +1,26 @@
-import tensorflow as tf
+"""Optional smoke test for the legacy Keras grading artifact."""
 
 import os
+import unittest
+from pathlib import Path
 
-def test_load_weights():
-    # 1. Khởi tạo kiến trúc mạng y hệt config.json
-    base_model = tf.keras.applications.EfficientNetB3(include_top=False, input_shape=(224, 224, 3))
-    
-    model = tf.keras.Sequential([
-        base_model,
-        tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.Dropout(0.2),
-        tf.keras.layers.Dense(5, activation='softmax')
-    ])
-    
-    # 2. Load weights từ file .keras
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(project_root, 'ai', 'weights', 'dr_grading_model.keras')
-    print(f"Loading weights from {model_path}...")
-    model.load_weights(model_path)
-    print("SUCCESS!")
 
-test_load_weights()
+class LegacyKerasWeightsTests(unittest.TestCase):
+    def test_legacy_weights_load_through_predictor_adapter(self):
+        model_path = Path(__file__).resolve().parent / "ai" / "weights" / "dr_grading_model.keras"
+        if not model_path.is_file() or model_path.stat().st_size == 0:
+            self.skipTest(f"Legacy Keras artifact is not installed: {model_path}")
+        try:
+            import tensorflow  # noqa: F401
+        except ImportError:
+            self.skipTest("TensorFlow is not installed in this environment")
+
+        from ai.grading.predictor import KerasEfficientNetPredictor
+
+        predictor = KerasEfficientNetPredictor(os.fspath(model_path))
+        self.assertIsNotNone(predictor.model)
+        self.assertEqual(len(predictor.info.class_names), 5)
+
+
+if __name__ == "__main__":
+    unittest.main()

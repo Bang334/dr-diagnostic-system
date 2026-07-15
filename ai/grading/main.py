@@ -1,27 +1,32 @@
-import os
-import cv2
+"""FastAPI entry point for five-grade diabetic-retinopathy inference."""
+
+from __future__ import annotations
+
 import base64
-import uuid
-import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-
-# Thêm đường dẫn gốc để import các module khác
+import os
 import sys
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(project_root)
+from pathlib import Path
+from typing import Any, Dict
 
-from ai.preprocessing.fundus_prep import preprocess_fundus_array
-from ai.grading.model_handler import DRModelHandler
+import cv2
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if os.fspath(PROJECT_ROOT) not in sys.path:
+    sys.path.append(os.fspath(PROJECT_ROOT))
+
+from ai.grading.predictor import DRPredictor, load_predictor
+
 
 app = FastAPI(
-    title="Diabetic Retinopathy Grading API (Thành viên 1)",
-    description="API chạy mô hình EfficientNet-B3 phân loại cấp độ DR.",
-    version="1.0"
+    title="Diabetic Retinopathy Grading API",
+    description="Inference for five-grade ICDR diabetic-retinopathy classifiers.",
+    version="2.0",
 )
-
-# Cấu hình CORS để Frontend/Backend khác có thể gọi được
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,106 +34,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Khởi tạo thư mục chứa model trọng số
-WEIGHTS_DIR = os.path.join(project_root, "ai", "weights")
-os.makedirs(WEIGHTS_DIR, exist_ok=True)
-MODEL_PATH = os.environ.get(
-    "DR_MODEL_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_model.keras")
-)
-PREPROCESS_ENHANCE = os.environ.get("DR_PREPROCESS_ENHANCE", "0") == "1"
+WEIGHTS_DIR = PROJECT_ROOT / "ai" / "weights"
+DEFAULT_MODEL = WEIGHTS_DIR / "dr_grading_model.keras"
+MODEL_PATH = Path(os.environ.get("DR_MODEL_PATH", os.fspath(DEFAULT_MODEL)))
+MODEL_BACKEND = os.environ.get("DR_MODEL_BACKEND", "auto")
+LEGACY_PREPROCESS_ENHANCE = os.environ.get("DR_PREPROCESS_ENHANCE", "0") == "1"
 
-# Khởi tạo thư mục tạm để lưu ảnh upload
-TEMP_DIR = os.path.join(project_root, "ai", "grading", "temp_uploads")
-os.makedirs(TEMP_DIR, exist_ok=True)
+dr_predictor: DRPredictor | None = None
+startup_error: str | None = None
 
-# Biến global lưu instance của model
-dr_model = None
 
 @app.on_event("startup")
-async def startup_event():
-    """Hàm chạy 1 lần duy nhất khi khởi động server, dùng để load model."""
-    global dr_model
-    print("=== ĐANG KHỞI ĐỘNG DR GRADING API ===")
-    
-    if not os.path.exists(MODEL_PATH):
-        print(f"[!] Chưa có file model tại {MODEL_PATH}")
-        print("[!] Bạn hãy copy file model thật của bạn đè lên đường dẫn này nhé.")
+async def startup_event() -> None:
+    global dr_predictor, startup_error
+    try:
+        dr_predictor = load_predictor(
+            MODEL_PATH,
+            backend=MODEL_BACKEND,
+            legacy_enhance=LEGACY_PREPROCESS_ENHANCE,
+        )
+        startup_error = None
+        print(
+            f"Loaded {dr_predictor.info.backend} grading model "
+            f"{dr_predictor.info.model_version}"
+        )
+    except Exception as error:
+        dr_predictor = None
+        startup_error = str(error)
+        print(f"Could not load DR grading model: {startup_error}")
 
-    dr_model = DRModelHandler(model_path=MODEL_PATH)
 
 @app.get("/")
-def root():
-    return {"message": "DR Grading API is running. Gửi POST request tới /analyze để phân tích ảnh."}
+def root() -> Dict[str, str]:
+    return {"message": "DR Grading API is running; POST an image to /analyze."}
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    if dr_predictor is None:
+        raise HTTPException(status_code=503, detail=startup_error or "Model is not loaded")
+    return {"status": "ready", "model_version": dr_predictor.info.model_version}
+
 
 @app.get("/model-info")
-def get_model_info():
-    """Trả về thông tin về file model đang được load để dễ dàng kiểm chứng."""
-    if not os.path.exists(MODEL_PATH):
-        return {"error": "Không tìm thấy file model!"}
-    
-    file_stat = os.stat(MODEL_PATH)
-    import datetime
-    last_modified = datetime.datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-    size_mb = round(file_stat.st_size / (1024 * 1024), 2)
-    
-    return {
-        "model_path": MODEL_PATH,
-        "last_modified": last_modified,
-        "size_MB": size_mb,
-        "model_version": dr_model.model_version if dr_model else "Unknown"
-    }
+def get_model_info() -> Dict[str, Any]:
+    if dr_predictor is None:
+        return {"error": startup_error or "Model is not loaded", "model_path": os.fspath(MODEL_PATH)}
+    result = dr_predictor.info.to_dict()
+    result["model_path"] = os.fspath(MODEL_PATH)
+    if MODEL_PATH.is_file():
+        result["size_MB"] = round(MODEL_PATH.stat().st_size / (1024 * 1024), 2)
+    return result
+
 
 @app.post("/analyze")
 async def analyze_fundus(file: UploadFile = File(...)):
-    """
-    Endpoint chính nhận file ảnh võng mạc, tiền xử lý và trả về cấp độ DR.
-    """
-    if dr_model is None or dr_model.model is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model chưa được load. Vui lòng kiểm tra lại file dr_grading_model.keras trong thư mục ai/weights."
-        )
+    if dr_predictor is None:
+        raise HTTPException(status_code=503, detail=startup_error or "Model is not loaded")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
 
-    # 1. Kiểm tra định dạng ảnh
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File upload không phải là ảnh hợp lệ.")
-
-    # 2. Lưu file ảnh tạm thời vào đĩa cứng
-    temp_filename = f"{uuid.uuid4().hex}_{file.filename}"
-    temp_path = os.path.join(TEMP_DIR, temp_filename)
-    
     try:
         content = await file.read()
-        with open(temp_path, "wb") as f:
-            f.write(content)
-            
-        img = cv2.imread(temp_path)
-        if img is None:
-            raise HTTPException(status_code=400, detail="Không thể đọc hoặc xử lý ảnh. Ảnh có thể bị hỏng.")
+        encoded = np.frombuffer(content, dtype=np.uint8)
+        image_bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            raise HTTPException(status_code=400, detail="Image is corrupt or unsupported")
 
-        # The same colour-preserving crop/resize is used by ai/grading/train.py.
-        preprocessed_img = preprocess_fundus_array(
-            img,
-            img_size=dr_model.input_size[0],
-            enhance=PREPROCESS_ENHANCE,
-        )
-
-        # 4. Dự đoán qua Model (Inference)
-        result = dr_model.predict(preprocessed_img)
-        
-        # 5. (Tùy chọn) Mã hóa ảnh đã tiền xử lý thành Base64 để Backend xem trước
-        _, buffer = cv2.imencode('.png', preprocessed_img)
-        b64_string = base64.b64encode(buffer).decode('utf-8')
-        result["preprocessed_preview_b64"] = f"data:image/png;base64,{b64_string}"
-        
+        prediction = dr_predictor.predict(image_bgr)
+        result = prediction.to_api_dict()
+        succeeded, buffer = cv2.imencode(".png", prediction.preprocessed_bgr)
+        if succeeded:
+            preview = base64.b64encode(buffer).decode("ascii")
+            result["preprocessed_preview_b64"] = f"data:image/png;base64,{preview}"
         return JSONResponse(content=result)
-        
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống trong quá trình phân tích: {str(e)}")
-        
-    finally:
-        # Xóa file rác sau khi xử lý xong (giải phóng dung lượng)
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"DR analysis failed: {error}") from error

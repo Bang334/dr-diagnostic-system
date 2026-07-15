@@ -14,6 +14,8 @@ import math
 import os
 import random
 import re
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -32,11 +34,13 @@ from huggingface_hub import get_token, hf_hub_download
 from PIL import Image
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     balanced_accuracy_score,
     classification_report,
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
 from timm.layers.pos_embed import resample_abs_pos_embed
@@ -45,13 +49,22 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from tqdm.auto import tqdm
 
+from ai.grading.artifacts import (
+    CLASS_NAMES,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    NUM_CLASSES,
+    ArtifactMetadata,
+    build_metadata,
+    checkpoint_metadata,
+    dump_metadata_json,
+    load_torch_checkpoint,
+    validate_resume_metadata,
+)
+from ai.grading.data_audit import audit_splits
 from ai.preprocessing.fundus_prep import preprocess_fundus_array
 
 
-NUM_CLASSES = 5
-CLASS_NAMES = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 SPLIT_ALIASES = {
     "train": ("train", "training"),
@@ -81,12 +94,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-images-per-grade",
         type=int,
-        default=1000,
+        default=None,
         help=(
-            "Maximum images used in total for each DR grade across all splits "
-            "(default: 1000); divided by --val-size and --test-size; "
-            "use 0 to use every available image"
+            "Deprecated compatibility option. Prefer separate train/eval limits."
         ),
+    )
+    parser.add_argument("--max-train-images-per-grade", type=int, default=None)
+    parser.add_argument(
+        "--max-eval-images-per-grade",
+        type=int,
+        default=0,
+        help="Maximum per grade in each validation/test split; 0 uses all images",
     )
 
     parser.add_argument(
@@ -107,26 +125,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument(
         "--loss",
-        choices=("ce", "coral"),
+        choices=("ce",),
         default="ce",
-        help="Cross-entropy baseline or ordinal CORAL-style thresholds",
+        help="Five-class cross-entropy baseline",
     )
     parser.add_argument(
         "--balance",
         choices=("none", "effective", "sampler"),
-        default="effective",
+        default="none",
         help="Use only one rebalancing method per experiment",
     )
     parser.add_argument("--effective-beta", type=float, default=0.9999)
 
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--freeze-epochs", type=int, default=3)
+    parser.add_argument(
+        "--freeze-epochs",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--adaptation",
+        choices=("linear_probe", "last_n_blocks", "full_finetune"),
+        default="last_n_blocks",
+    )
+    parser.add_argument("--last-n-blocks", type=int, default=6)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--accum-steps", type=int, default=8)
-    parser.add_argument("--head-lr", type=float, default=1e-4)
-    parser.add_argument("--backbone-lr", type=float, default=1e-5)
+    parser.add_argument("--peak-lr", type=float, default=1e-4)
+    parser.add_argument("--head-lr", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--backbone-lr", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--warmup-epochs", type=float, default=3.0)
+    parser.add_argument("--layer-decay", type=float, default=0.75)
     parser.add_argument("--min-lr", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--label-smoothing", type=float, default=0.05)
+    parser.add_argument("--crop-tolerance", type=int, default=7)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-size", type=float, default=0.15)
@@ -135,6 +169,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--enhance", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--leakage-policy",
+        choices=("error", "warn", "off"),
+        default="error",
+    )
+    parser.add_argument("--phash-distance", type=int, default=4)
+    parser.add_argument("--audit-only", action="store_true")
     return parser.parse_args()
 
 
@@ -150,20 +191,49 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--images-dir and --labels-csv must be provided together")
     if args.model_source == "retfound" and args.image_size != 224:
         raise ValueError("RETFound-DINOv2 currently requires --image-size 224")
-    if args.loss == "coral" and args.balance == "effective":
-        raise ValueError(
-            "Use --balance none or --balance sampler with --loss coral so two "
-            "reweighting methods are not mixed."
-        )
     if args.val_size <= 0 or args.test_size <= 0:
         raise ValueError("Validation and test sizes must be positive")
     if args.val_size + args.test_size >= 1:
         raise ValueError("val-size + test-size must be below 1")
     if args.accum_steps < 1:
         raise ValueError("accum-steps must be at least 1")
-    if args.max_images_per_grade < 0:
+    if args.freeze_epochs is not None:
+        warnings.warn(
+            "--freeze-epochs is deprecated and ignored; use --adaptation",
+            DeprecationWarning,
+        )
+    if args.head_lr is not None:
+        warnings.warn("--head-lr is deprecated; using its value as --peak-lr")
+        args.peak_lr = args.head_lr
+    if args.backbone_lr is not None:
+        warnings.warn(
+            "--backbone-lr is ignored; layer-wise rates are derived from "
+            "--peak-lr and --layer-decay"
+        )
+    if args.peak_lr <= 0 or args.min_lr < 0 or args.min_lr > args.peak_lr:
+        raise ValueError("Require 0 <= min-lr <= peak-lr")
+    if not 0 < args.layer_decay <= 1:
+        raise ValueError("layer-decay must be in (0, 1]")
+    if args.warmup_epochs < 0 or args.warmup_epochs >= args.epochs:
+        raise ValueError("warmup-epochs must be non-negative and below epochs")
+    if args.last_n_blocks < 1:
+        raise ValueError("last-n-blocks must be at least 1")
+    if not 0 <= args.label_smoothing < 1:
+        raise ValueError("label-smoothing must be in [0, 1)")
+    if args.max_images_per_grade is not None and args.max_images_per_grade < 0:
         raise ValueError("max-images-per-grade cannot be negative")
-    split_grade_limits(args.max_images_per_grade, args.val_size, args.test_size)
+    if args.max_train_images_per_grade is None:
+        if args.max_images_per_grade is None:
+            args.max_train_images_per_grade = 700
+        else:
+            legacy_limits = split_grade_limits(
+                args.max_images_per_grade, args.val_size, args.test_size
+            )
+            args.max_train_images_per_grade = legacy_limits["train"]
+    if args.max_train_images_per_grade < 0 or args.max_eval_images_per_grade < 0:
+        raise ValueError("Per-grade image limits cannot be negative")
+    if args.phash_distance < 0 or args.phash_distance > 16:
+        raise ValueError("phash-distance must be between 0 and 16")
 
 
 def seed_everything(seed: int) -> None:
@@ -175,21 +245,17 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-def load_or_create_csv_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+def load_or_create_csv_splits(
+    args: argparse.Namespace, *, apply_limits: bool = True
+) -> dict[str, pd.DataFrame]:
     split_dir = args.split_dir or (args.output_dir / "splits")
     split_dir.mkdir(parents=True, exist_ok=True)
     paths = {name: split_dir / f"{name}.csv" for name in ("train", "val", "test")}
     if all(path.exists() for path in paths.values()):
         print(f"Reusing fixed splits from {split_dir}")
         splits = {name: pd.read_csv(path) for name, path in paths.items()}
-        splits = limit_splits_per_grade(
-            splits,
-            args.label_column,
-            args.max_images_per_grade,
-            args.val_size,
-            args.test_size,
-            args.seed,
-        )
+        if apply_limits:
+            splits = limit_splits_for_experiment(splits, args)
         for name, split in splits.items():
             split.to_csv(paths[name], index=False)
         return splits
@@ -223,14 +289,8 @@ def load_or_create_csv_splits(args: argparse.Namespace) -> dict[str, pd.DataFram
         "val": val.reset_index(drop=True),
         "test": test.reset_index(drop=True),
     }
-    splits = limit_splits_per_grade(
-        splits,
-        args.label_column,
-        args.max_images_per_grade,
-        args.val_size,
-        args.test_size,
-        args.seed,
-    )
+    if apply_limits:
+        splits = limit_splits_for_experiment(splits, args)
     for name, split in splits.items():
         split.to_csv(paths[name], index=False)
         print(f"{name}: {len(split)} samples; {split[args.label_column].value_counts().sort_index().to_dict()}")
@@ -383,6 +443,31 @@ def limit_splits_per_grade(
     return limited
 
 
+def limit_splits_for_experiment(
+    splits: dict[str, pd.DataFrame], args: Any
+) -> dict[str, pd.DataFrame]:
+    """Limit training independently while keeping evaluation complete by default."""
+    train_limit = int(getattr(args, "max_train_images_per_grade", 0) or 0)
+    eval_limit = int(getattr(args, "max_eval_images_per_grade", 0) or 0)
+    limits = {"train": train_limit, "val": eval_limit, "test": eval_limit}
+    limited: dict[str, pd.DataFrame] = {}
+    seed_offsets = {"train": 0, "val": 1000, "test": 2000}
+    for name, split in splits.items():
+        limit = limits[name]
+        limited[name] = limit_samples_per_grade(
+            split,
+            args.label_column,
+            limit,
+            args.seed + seed_offsets[name],
+        )
+        if limit:
+            print(
+                f"Limited {name} from {len(split)} to {len(limited[name])} "
+                f"(at most {limit} images per grade)"
+            )
+    return limited
+
+
 def split_grade_limits(
     max_per_grade: int, val_size: float, test_size: float
 ) -> dict[str, int]:
@@ -401,7 +486,9 @@ def split_grade_limits(
     return limits
 
 
-def load_predefined_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+def load_predefined_splits(
+    args: argparse.Namespace, *, apply_limits: bool = True
+) -> dict[str, pd.DataFrame]:
     split_paths = find_predefined_splits(args.dataset_dir)
     dataset_root = next(iter(split_paths.values())).parent
     splits = {
@@ -414,14 +501,18 @@ def load_predefined_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
             for name, split in splits.items()
         }
 
-    splits = limit_splits_per_grade(
-        splits,
-        args.label_column,
-        args.max_images_per_grade,
-        args.val_size,
-        args.test_size,
-        args.seed,
-    )
+    if apply_limits:
+        if hasattr(args, "max_train_images_per_grade"):
+            splits = limit_splits_for_experiment(splits, args)
+        else:
+            splits = limit_splits_per_grade(
+                splits,
+                args.label_column,
+                args.max_images_per_grade,
+                args.val_size,
+                args.test_size,
+                args.seed,
+            )
 
     all_paths: list[str] = []
     manifest_dir = args.split_dir or (args.output_dir / "splits")
@@ -437,10 +528,20 @@ def load_predefined_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
     return splits
 
 
-def load_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+def load_splits(
+    args: argparse.Namespace, *, apply_limits: bool = True
+) -> dict[str, pd.DataFrame]:
     if args.dataset_dir is not None:
-        return load_predefined_splits(args)
-    return load_or_create_csv_splits(args)
+        return load_predefined_splits(args, apply_limits=apply_limits)
+    return load_or_create_csv_splits(args, apply_limits=apply_limits)
+
+
+def save_split_manifests(
+    splits: dict[str, pd.DataFrame], manifest_dir: Path
+) -> None:
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    for name, split in splits.items():
+        split.to_csv(manifest_dir / f"{name}.csv", index=False)
 
 
 class FundusDataset(Dataset):
@@ -478,8 +579,9 @@ class FundusDataset(Dataset):
             raise FileNotFoundError(f"Could not read image: {path}")
         image_bgr = preprocess_fundus_array(
             image_bgr,
-            self.args.image_size,
+            img_size=None,
             enhance=self.args.enhance,
+            crop_tolerance=self.args.crop_tolerance,
         )
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         image = self.transform(Image.fromarray(image_rgb))
@@ -523,11 +625,18 @@ def effective_number_weights(
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
 
-def build_sampler(labels: list[int]) -> WeightedRandomSampler:
+def build_sampler(
+    labels: list[int], *, generator: torch.Generator | None = None
+) -> WeightedRandomSampler:
     counts = np.bincount(np.asarray(labels), minlength=NUM_CLASSES)
     class_weights = 1.0 / np.maximum(counts, 1)
     sample_weights = torch.tensor([class_weights[label] for label in labels], dtype=torch.double)
-    return WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+    return WeightedRandomSampler(
+        sample_weights,
+        len(sample_weights),
+        replacement=True,
+        generator=generator,
+    )
 
 
 def resize_pos_embed_for_model(state: dict[str, torch.Tensor], model: nn.Module) -> None:
@@ -608,11 +717,10 @@ def load_retfound_dinov2(args: argparse.Namespace, output_dim: int) -> nn.Module
 
 
 def build_model(args: argparse.Namespace) -> nn.Module:
-    output_dim = NUM_CLASSES if args.loss == "ce" else NUM_CLASSES - 1
     if args.model_source == "retfound":
-        return load_retfound_dinov2(args, output_dim)
+        return load_retfound_dinov2(args, NUM_CLASSES)
     print(f"Loading timm pretrained model {args.model_name}")
-    return timm.create_model(args.model_name, pretrained=True, num_classes=output_dim)
+    return timm.create_model(args.model_name, pretrained=True, num_classes=NUM_CLASSES)
 
 
 def is_head_parameter(name: str) -> bool:
@@ -620,57 +728,145 @@ def is_head_parameter(name: str) -> bool:
     return bool(parts.intersection({"head", "classifier", "fc"}))
 
 
-def configure_trainable(model: nn.Module, freeze_backbone: bool) -> None:
-    for name, parameter in model.named_parameters():
-        parameter.requires_grad = (not freeze_backbone) or is_head_parameter(name)
+def configure_trainable(
+    model: nn.Module, adaptation: str, last_n_blocks: int = 6
+) -> None:
+    if adaptation == "full_finetune":
+        for parameter in model.parameters():
+            parameter.requires_grad = True
+    elif adaptation == "linear_probe":
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = is_head_parameter(name)
+    elif adaptation == "last_n_blocks":
+        blocks = getattr(model, "blocks", None)
+        if blocks is None:
+            raise ValueError("last_n_blocks adaptation requires a ViT-style model.blocks")
+        if last_n_blocks > len(blocks):
+            raise ValueError(
+                f"Requested {last_n_blocks} blocks, but model only has {len(blocks)}"
+            )
+        first_trainable = len(blocks) - last_n_blocks
+        for name, parameter in model.named_parameters():
+            block_match = re.match(r"^blocks\.(\d+)\.", name)
+            train_block = bool(
+                block_match and int(block_match.group(1)) >= first_trainable
+            )
+            final_norm = name.startswith(("norm.", "fc_norm."))
+            parameter.requires_grad = (
+                is_head_parameter(name) or train_block or final_norm
+            )
+    else:
+        raise ValueError(f"Unsupported adaptation mode: {adaptation}")
     count = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-    print(f"Trainable parameters: {count / 1e6:.2f}M; backbone frozen={freeze_backbone}")
+    print(f"Trainable parameters: {count / 1e6:.2f}M; adaptation={adaptation}")
     if count == 0:
         raise RuntimeError("No trainable parameters found; classifier name is unsupported")
 
 
 def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.Optimizer:
-    head, backbone = [], []
+    blocks = getattr(model, "blocks", None)
+    block_count = len(blocks) if blocks is not None else 0
+    maximum_layer = block_count + 1
+    groups: dict[tuple[int, bool], dict[str, Any]] = {}
+
+    def layer_id(name: str) -> int:
+        if is_head_parameter(name) or name.startswith(("norm.", "fc_norm.")):
+            return maximum_layer
+        match = re.match(r"^blocks\.(\d+)\.", name)
+        if match:
+            return int(match.group(1)) + 1
+        return 0
+
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        (head if is_head_parameter(name) else backbone).append(parameter)
-    groups: list[dict[str, Any]] = []
-    if backbone:
-        groups.append({"params": backbone, "lr": args.backbone_lr, "base_lr": args.backbone_lr})
-    if head:
-        groups.append({"params": head, "lr": args.head_lr, "base_lr": args.head_lr})
-    return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
-
-
-class CoralLoss(nn.Module):
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        levels = torch.arange(NUM_CLASSES - 1, device=targets.device).unsqueeze(0)
-        ordinal_targets = (targets.unsqueeze(1) > levels).float()
-        return nn.functional.binary_cross_entropy_with_logits(logits, ordinal_targets)
+        current_layer = layer_id(name)
+        no_decay = parameter.ndim == 1 or name.endswith(".bias") or name in {
+            "pos_embed",
+            "cls_token",
+            "mask_token",
+        }
+        key = (current_layer, no_decay)
+        if key not in groups:
+            lr_scale = args.layer_decay ** (maximum_layer - current_layer)
+            groups[key] = {
+                "params": [],
+                "lr": args.peak_lr * lr_scale,
+                "base_lr": args.peak_lr * lr_scale,
+                "lr_scale": lr_scale,
+                "weight_decay": 0.0 if no_decay else args.weight_decay,
+                "group_name": f"layer_{current_layer}_{'no_decay' if no_decay else 'decay'}",
+            }
+        groups[key]["params"].append(parameter)
+    ordered_groups = [groups[key] for key in sorted(groups)]
+    if not ordered_groups:
+        raise RuntimeError("No trainable parameters available to the optimizer")
+    print("Optimizer parameter groups:")
+    for group in ordered_groups:
+        parameter_count = sum(parameter.numel() for parameter in group["params"])
+        print(
+            f"  {group['group_name']}: {parameter_count / 1e6:.2f}M, "
+            f"peak_lr={group['base_lr']:.3e}, wd={group['weight_decay']}"
+        )
+    return torch.optim.AdamW(ordered_groups, lr=args.peak_lr)
 
 
 def build_criterion(
     args: argparse.Namespace, train_labels: list[int], device: torch.device
 ) -> nn.Module:
-    if args.loss == "coral":
-        return CoralLoss()
     weights = None
     if args.balance == "effective":
         weights = effective_number_weights(train_labels, args.effective_beta, device)
-    return nn.CrossEntropyLoss(weight=weights, label_smoothing=0.05)
+    return nn.CrossEntropyLoss(weight=weights, label_smoothing=args.label_smoothing)
 
 
-def predictions_from_logits(logits: torch.Tensor, loss_name: str) -> torch.Tensor:
-    if loss_name == "coral":
-        return (torch.sigmoid(logits) > 0.5).sum(dim=1)
+def predictions_from_logits(logits: torch.Tensor, loss_name: str = "ce") -> torch.Tensor:
     return logits.argmax(dim=1)
+
+
+class WarmupCosineScheduler:
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        *,
+        total_updates: int,
+        warmup_updates: int,
+        min_lr: float,
+    ) -> None:
+        if total_updates < 1:
+            raise ValueError("Scheduler needs at least one optimizer update")
+        self.optimizer = optimizer
+        self.total_updates = total_updates
+        self.warmup_updates = max(0, min(warmup_updates, total_updates - 1))
+        self.min_lr = min_lr
+        self.last_update = -1
+
+    def _base_lr(self, update: int) -> float:
+        if self.warmup_updates and update < self.warmup_updates:
+            return (update + 1) / self.warmup_updates
+        cosine_updates = max(self.total_updates - self.warmup_updates, 1)
+        progress = (update - self.warmup_updates) / max(cosine_updates - 1, 1)
+        return 0.5 * (1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0)))
+
+    def step_update(self, update: int) -> None:
+        multiplier = self._base_lr(update)
+        for group in self.optimizer.param_groups:
+            peak = float(group["base_lr"])
+            floor = self.min_lr * float(group.get("lr_scale", 1.0))
+            group["lr"] = floor + (peak - floor) * multiplier
+        self.last_update = update
+
+    def state_dict(self) -> dict[str, int]:
+        return {"last_update": self.last_update}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.last_update = int(state.get("last_update", -1))
 
 
 def create_scaler(enabled: bool):
     try:
         return torch.amp.GradScaler("cuda", enabled=enabled)
-    except TypeError:  # PyTorch before the device-aware AMP API
+    except (AttributeError, TypeError):  # PyTorch before the device-aware AMP API
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
@@ -683,13 +879,19 @@ def train_one_epoch(
     device: torch.device,
     args: argparse.Namespace,
     amp_enabled: bool,
-) -> float:
+    scheduler: WarmupCosineScheduler,
+    global_update: int,
+) -> tuple[float, float, int]:
     model.train()
     optimizer.zero_grad(set_to_none=True)
     running_loss = 0.0
     sample_count = 0
+    gradient_norm_sum = 0.0
+    optimizer_steps = 0
     progress = tqdm(loader, desc="train", leave=False)
     for step, (images, targets, _) in enumerate(progress):
+        if step % args.accum_steps == 0:
+            scheduler.step_update(global_update)
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
@@ -699,15 +901,31 @@ def train_one_epoch(
         should_step = (step + 1) % args.accum_steps == 0 or step + 1 == len(loader)
         if should_step:
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            gradient_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            gradient_norm_sum += float(gradient_norm)
+            optimizer_steps += 1
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            global_update += 1
         batch_size = targets.size(0)
         running_loss += loss.item() * batch_size
         sample_count += batch_size
         progress.set_postfix(loss=f"{running_loss / sample_count:.4f}")
-    return running_loss / max(sample_count, 1)
+    return (
+        running_loss / max(sample_count, 1),
+        gradient_norm_sum / max(optimizer_steps, 1),
+        global_update,
+    )
+
+
+@dataclass
+class EvaluationResult:
+    loss: float
+    targets: list[int]
+    predictions: list[int]
+    probabilities: list[list[float]]
+    image_ids: list[str]
 
 
 @torch.no_grad()
@@ -718,12 +936,13 @@ def evaluate(
     device: torch.device,
     loss_name: str,
     amp_enabled: bool,
-) -> tuple[float, list[int], list[int], list[str]]:
+) -> EvaluationResult:
     model.eval()
     total_loss = 0.0
     sample_count = 0
     all_targets: list[int] = []
     all_predictions: list[int] = []
+    all_probabilities: list[list[float]] = []
     all_ids: list[str] = []
     for images, targets, image_ids in tqdm(loader, desc="eval", leave=False):
         images = images.to(device, non_blocking=True)
@@ -732,16 +951,59 @@ def evaluate(
             logits = model(images)
             loss = criterion(logits, targets)
         predictions = predictions_from_logits(logits, loss_name)
+        probabilities = torch.softmax(logits, dim=1)
         batch_size = targets.size(0)
         total_loss += loss.item() * batch_size
         sample_count += batch_size
         all_targets.extend(targets.cpu().tolist())
         all_predictions.extend(predictions.cpu().tolist())
+        all_probabilities.extend(probabilities.float().cpu().tolist())
         all_ids.extend(image_ids)
-    return total_loss / max(sample_count, 1), all_targets, all_predictions, all_ids
+    return EvaluationResult(
+        loss=total_loss / max(sample_count, 1),
+        targets=all_targets,
+        predictions=all_predictions,
+        probabilities=all_probabilities,
+        image_ids=all_ids,
+    )
 
 
-def calculate_metrics(targets: list[int], predictions: list[int]) -> dict[str, Any]:
+def expected_calibration_error(
+    targets: list[int], probabilities: list[list[float]], bins: int = 15
+) -> float:
+    target_array = np.asarray(targets, dtype=np.int64)
+    probability_array = np.asarray(probabilities, dtype=np.float64)
+    confidence = probability_array.max(axis=1)
+    predicted = probability_array.argmax(axis=1)
+    correct = predicted == target_array
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    error = 0.0
+    for index in range(bins):
+        lower, upper = edges[index], edges[index + 1]
+        mask = (confidence > lower) & (confidence <= upper)
+        if index == 0:
+            mask |= confidence == 0.0
+        if mask.any():
+            error += float(mask.mean()) * abs(
+                float(correct[mask].mean()) - float(confidence[mask].mean())
+            )
+    return error
+
+
+def multiclass_brier_score(
+    targets: list[int], probabilities: list[list[float]]
+) -> float:
+    target_array = np.asarray(targets, dtype=np.int64)
+    probability_array = np.asarray(probabilities, dtype=np.float64)
+    one_hot = np.eye(NUM_CLASSES, dtype=np.float64)[target_array]
+    return float(np.mean(np.sum((probability_array - one_hot) ** 2, axis=1)))
+
+
+def calculate_metrics(
+    targets: list[int],
+    predictions: list[int],
+    probabilities: list[list[float]] | None = None,
+) -> dict[str, Any]:
     report = classification_report(
         targets,
         predictions,
@@ -750,7 +1012,7 @@ def calculate_metrics(targets: list[int], predictions: list[int]) -> dict[str, A
         output_dict=True,
         zero_division=0,
     )
-    return {
+    metrics: dict[str, Any] = {
         "accuracy": float(accuracy_score(targets, predictions)),
         "macro_f1": float(
             f1_score(
@@ -767,19 +1029,24 @@ def calculate_metrics(targets: list[int], predictions: list[int]) -> dict[str, A
             name: float(report[name]["recall"]) for name in CLASS_NAMES
         },
     }
-
-
-def set_cosine_lr(
-    optimizer: torch.optim.Optimizer, epoch: int, args: argparse.Namespace
-) -> None:
-    if epoch < args.freeze_epochs:
-        return
-    total = max(args.epochs - args.freeze_epochs - 1, 1)
-    progress = min(max((epoch - args.freeze_epochs) / total, 0.0), 1.0)
-    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-    for group in optimizer.param_groups:
-        base_lr = group["base_lr"]
-        group["lr"] = args.min_lr + (base_lr - args.min_lr) * cosine
+    if probabilities is not None:
+        probability_array = np.asarray(probabilities, dtype=np.float64)
+        one_hot = np.eye(NUM_CLASSES, dtype=np.int64)[np.asarray(targets)]
+        try:
+            metrics["macro_auroc"] = float(
+                roc_auc_score(one_hot, probability_array, average="macro")
+            )
+        except ValueError:
+            metrics["macro_auroc"] = float("nan")
+        try:
+            metrics["macro_auprc"] = float(
+                average_precision_score(one_hot, probability_array, average="macro")
+            )
+        except ValueError:
+            metrics["macro_auprc"] = float("nan")
+        metrics["ece_15_bin"] = expected_calibration_error(targets, probabilities)
+        metrics["multiclass_brier"] = multiclass_brier_score(targets, probabilities)
+    return metrics
 
 
 def save_checkpoint(
@@ -790,8 +1057,11 @@ def save_checkpoint(
     epoch: int,
     best_qwk: float,
     stale_epochs: int,
-    freeze_backbone: bool,
     args: argparse.Namespace,
+    metadata: ArtifactMetadata,
+    scheduler: WarmupCosineScheduler,
+    global_update: int,
+    loader_generator: torch.Generator,
     *,
     include_training_state: bool,
 ) -> None:
@@ -801,31 +1071,59 @@ def save_checkpoint(
         "epoch": epoch,
         "best_qwk": best_qwk,
         "stale_epochs": stale_epochs,
-        "freeze_backbone": freeze_backbone,
         "args": vars(args),
+        "metadata": metadata.to_dict(),
     }
     if include_training_state:
         state.update(
             {
                 "optimizer": optimizer.state_dict(),
                 "scaler": scaler.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "global_update": global_update,
+                "rng_state": {
+                    "python": random.getstate(),
+                    "numpy": np.random.get_state(),
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all(),
+                    "loader_generator": loader_generator.get_state(),
+                },
             }
         )
-    torch.save(state, path)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state, temporary_path)
+    os.replace(temporary_path, path)
+
+
+def restore_rng_state(state: dict[str, Any], loader_generator: torch.Generator) -> None:
+    if not state:
+        return
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and state.get("cuda"):
+        torch.cuda.set_rng_state_all(state["cuda"])
+    if state.get("loader_generator") is not None:
+        loader_generator.set_state(state["loader_generator"])
 
 
 def save_evaluation_artifacts(
     output_dir: Path,
     targets: list[int],
     predictions: list[int],
+    probabilities: list[list[float]],
     image_ids: list[str],
     metrics: dict[str, Any],
 ) -> None:
     with (output_dir / "test_metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2, ensure_ascii=False)
-    pd.DataFrame(
+    prediction_frame = pd.DataFrame(
         {"image_id": image_ids, "true_grade": targets, "predicted_grade": predictions}
-    ).to_csv(output_dir / "test_predictions.csv", index=False)
+    )
+    probability_array = np.asarray(probabilities, dtype=np.float64)
+    for grade in range(NUM_CLASSES):
+        prediction_frame[f"prob_grade_{grade}"] = probability_array[:, grade]
+    prediction_frame.to_csv(output_dir / "test_predictions.csv", index=False)
 
     matrix = confusion_matrix(
         targets, predictions, labels=list(range(NUM_CLASSES)), normalize="true"
@@ -847,12 +1145,62 @@ def save_evaluation_artifacts(
     plt.savefig(output_dir / "confusion_matrix_normalized.png", dpi=180)
     plt.close()
 
+    confidence = probability_array.max(axis=1)
+    correct = probability_array.argmax(axis=1) == np.asarray(targets)
+    edges = np.linspace(0.0, 1.0, 16)
+    bin_confidence: list[float] = []
+    bin_accuracy: list[float] = []
+    for index in range(15):
+        mask = (confidence > edges[index]) & (confidence <= edges[index + 1])
+        if index == 0:
+            mask |= confidence == 0.0
+        if mask.any():
+            bin_confidence.append(float(confidence[mask].mean()))
+            bin_accuracy.append(float(correct[mask].mean()))
+    plt.figure(figsize=(6, 6))
+    plt.plot([0, 1], [0, 1], "--", color="gray", label="perfect calibration")
+    plt.plot(bin_confidence, bin_accuracy, marker="o", label="model")
+    plt.xlabel("Mean confidence")
+    plt.ylabel("Accuracy")
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / "reliability_diagram.png", dpi=180)
+    plt.close()
+
 
 def main() -> None:
     args = parse_args()
     validate_args(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     seed_everything(args.seed)
+
+    raw_splits = load_splits(args, apply_limits=False)
+    if args.leakage_policy == "off":
+        audited_splits = raw_splits
+    else:
+        audit_result = audit_splits(
+            raw_splits,
+            args,
+            args.output_dir / "audit",
+            phash_distance=args.phash_distance,
+            fail_on_leakage=args.leakage_policy == "error",
+        )
+        audited_splits = audit_result.splits
+        print(json.dumps(audit_result.report, indent=2, ensure_ascii=False))
+    if args.audit_only:
+        print(f"Audit complete: {args.output_dir / 'audit'}")
+        return
+
+    splits = limit_splits_for_experiment(audited_splits, args)
+    manifest_dir = args.split_dir or (args.output_dir / "splits")
+    save_split_manifests(splits, manifest_dir)
+    project_root = Path(__file__).resolve().parents[2]
+    metadata = build_metadata(
+        args, manifest_dir=manifest_dir, project_root=project_root
+    )
+    dump_metadata_json(metadata, args.output_dir / "artifact_metadata.json")
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required. In Colab choose a GPU runtime first.")
@@ -861,7 +1209,6 @@ def main() -> None:
     print(f"GPU: {torch.cuda.get_device_name(0)} ({memory_gb:.1f} GB)")
     amp_enabled = not args.no_amp
 
-    splits = load_splits(args)
     train_transform, eval_transform = build_transforms(args.image_size)
     datasets = {
         "train": FundusDataset(splits["train"], args, train_transform),
@@ -869,7 +1216,13 @@ def main() -> None:
         "test": FundusDataset(splits["test"], args, eval_transform),
     }
     train_labels = splits["train"][args.label_column].astype(int).tolist()
-    sampler = build_sampler(train_labels) if args.balance == "sampler" else None
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed)
+    sampler = (
+        build_sampler(train_labels, generator=loader_generator)
+        if args.balance == "sampler"
+        else None
+    )
     loaders = {
         "train": DataLoader(
             datasets["train"],
@@ -879,6 +1232,7 @@ def main() -> None:
             num_workers=args.num_workers,
             pin_memory=True,
             drop_last=True,
+            generator=loader_generator,
         ),
         "val": DataLoader(
             datasets["val"],
@@ -897,34 +1251,48 @@ def main() -> None:
     }
 
     model = build_model(args).to(device)
+    configure_trainable(model, args.adaptation, args.last_n_blocks)
     criterion = build_criterion(args, train_labels, device)
     scaler = create_scaler(amp_enabled)
     start_epoch, best_qwk, stale_epochs = 0, -1.0, 0
     resume_state = None
     if args.resume:
-        resume_state = torch.load(args.resume, map_location="cpu")
+        resume_state = load_torch_checkpoint(args.resume)
+        saved_metadata = checkpoint_metadata(resume_state)
+        if saved_metadata.schema_version > 0:
+            validate_resume_metadata(saved_metadata, metadata)
+        else:
+            print(
+                "Warning: legacy checkpoint has no artifact contract; "
+                "optimizer/scheduler state will not be restored."
+            )
         model.load_state_dict(resume_state["model"])
         start_epoch = int(resume_state["epoch"]) + 1
         best_qwk = float(resume_state.get("best_qwk", -1.0))
         stale_epochs = int(resume_state.get("stale_epochs", 0))
         print(f"Resuming from epoch {start_epoch}; best QWK={best_qwk:.4f}")
 
-    freeze_backbone = start_epoch < args.freeze_epochs
-    configure_trainable(model, freeze_backbone)
     optimizer = build_optimizer(model, args)
-    if resume_state and bool(resume_state.get("freeze_backbone")) == freeze_backbone:
+    updates_per_epoch = math.ceil(len(loaders["train"]) / args.accum_steps)
+    scheduler = WarmupCosineScheduler(
+        optimizer,
+        total_updates=args.epochs * updates_per_epoch,
+        warmup_updates=round(args.warmup_epochs * updates_per_epoch),
+        min_lr=args.min_lr,
+    )
+    global_update = 0
+    if resume_state and checkpoint_metadata(resume_state).schema_version > 0:
         optimizer.load_state_dict(resume_state["optimizer"])
         scaler.load_state_dict(resume_state.get("scaler", {}))
+        scheduler.load_state_dict(resume_state.get("scheduler", {}))
+        global_update = int(
+            resume_state.get("global_update", start_epoch * updates_per_epoch)
+        )
+        restore_rng_state(resume_state.get("rng_state", {}), loader_generator)
 
     history_path = args.output_dir / "history.jsonl"
     for epoch in range(start_epoch, args.epochs):
-        if freeze_backbone and epoch >= args.freeze_epochs:
-            freeze_backbone = False
-            configure_trainable(model, freeze_backbone=False)
-            optimizer = build_optimizer(model, args)
-        set_cosine_lr(optimizer, epoch, args)
-
-        train_loss = train_one_epoch(
+        train_loss, gradient_norm, global_update = train_one_epoch(
             model,
             loaders["train"],
             criterion,
@@ -933,8 +1301,10 @@ def main() -> None:
             device,
             args,
             amp_enabled,
+            scheduler,
+            global_update,
         )
-        val_loss, targets, predictions, _ = evaluate(
+        validation = evaluate(
             model,
             loaders["val"],
             criterion,
@@ -942,11 +1312,20 @@ def main() -> None:
             args.loss,
             amp_enabled,
         )
-        metrics = calculate_metrics(targets, predictions)
+        metrics = calculate_metrics(
+            validation.targets,
+            validation.predictions,
+            validation.probabilities,
+        )
+        current_lrs = [float(group["lr"]) for group in optimizer.param_groups]
         record = {
             "epoch": epoch,
             "train_loss": train_loss,
-            "val_loss": val_loss,
+            "val_loss": validation.loss,
+            "gradient_norm": gradient_norm,
+            "lr_min": min(current_lrs),
+            "lr_max": max(current_lrs),
+            "global_update": global_update,
             **metrics,
         }
         print(json.dumps(record, ensure_ascii=False))
@@ -965,8 +1344,11 @@ def main() -> None:
                 epoch,
                 best_qwk,
                 stale_epochs,
-                freeze_backbone,
                 args,
+                metadata,
+                scheduler,
+                global_update,
+                loader_generator,
                 include_training_state=False,
             )
         else:
@@ -979,18 +1361,21 @@ def main() -> None:
             epoch,
             best_qwk,
             stale_epochs,
-            freeze_backbone,
             args,
+            metadata,
+            scheduler,
+            global_update,
+            loader_generator,
             include_training_state=True,
         )
         if stale_epochs >= args.patience:
             print(f"Early stopping after {stale_epochs} epochs without QWK improvement")
             break
 
-    best = torch.load(args.output_dir / "checkpoint-best.pth", map_location="cpu")
+    best = load_torch_checkpoint(args.output_dir / "checkpoint-best.pth")
     model.load_state_dict(best["model"])
     model.to(device)
-    test_loss, targets, predictions, image_ids = evaluate(
+    test_result = evaluate(
         model,
         loaders["test"],
         criterion,
@@ -998,8 +1383,22 @@ def main() -> None:
         args.loss,
         amp_enabled,
     )
-    metrics = {"loss": test_loss, **calculate_metrics(targets, predictions)}
-    save_evaluation_artifacts(args.output_dir, targets, predictions, image_ids, metrics)
+    metrics = {
+        "loss": test_result.loss,
+        **calculate_metrics(
+            test_result.targets,
+            test_result.predictions,
+            test_result.probabilities,
+        ),
+    }
+    save_evaluation_artifacts(
+        args.output_dir,
+        test_result.targets,
+        test_result.predictions,
+        test_result.probabilities,
+        test_result.image_ids,
+        metrics,
+    )
     print("Final test metrics:")
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
 
