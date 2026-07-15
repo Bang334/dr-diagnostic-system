@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from ai.grading.train import load_predefined_splits, resize_pos_embed_for_model
+from ai.grading.train import (
+    load_predefined_splits,
+    resize_pos_embed_for_model,
+    split_grade_limits,
+)
 
 
 class _PatchEmbed(nn.Module):
@@ -45,7 +49,7 @@ class PredefinedSplitTests(unittest.TestCase):
                 for grade in range(5):
                     class_dir = dataset_dir / "split_dataset" / split_name / str(grade)
                     class_dir.mkdir(parents=True, exist_ok=True)
-                    sample_count = 3
+                    sample_count = 15 if split_name == "train" else 4
                     for index in range(sample_count):
                         (class_dir / f"sample-{split_name}-{grade}-{index}.jpg").write_bytes(
                             b"image"
@@ -56,23 +60,24 @@ class PredefinedSplitTests(unittest.TestCase):
                 output_dir=root / "run",
                 split_dir=None,
                 label_column="diagnosis",
-                max_train_images_per_grade=2,
-                max_eval_images_per_grade=2,
+                max_images_per_grade=20,
+                val_size=0.15,
+                test_size=0.15,
                 seed=17,
             )
             splits = load_predefined_splits(args)
 
             self.assertEqual(set(splits), {"train", "val", "test"})
-            self.assertEqual(len(splits["train"]), 10)
+            self.assertEqual(len(splits["train"]), 70)
             self.assertEqual(
                 splits["train"]["diagnosis"].value_counts().sort_index().to_dict(),
-                {grade: 2 for grade in range(5)},
+                {grade: 14 for grade in range(5)},
             )
             for split in (splits["val"], splits["test"]):
-                self.assertEqual(len(split), 10)
+                self.assertEqual(len(split), 15)
                 self.assertEqual(
                     split["diagnosis"].value_counts().sort_index().to_dict(),
-                    {grade: 2 for grade in range(5)},
+                    {grade: 3 for grade in range(5)},
                 )
                 self.assertTrue(split["image_id"].str.endswith(".jpg").all())
             self.assertTrue((root / "run" / "splits" / "val.csv").is_file())
@@ -84,6 +89,14 @@ class PredefinedSplitTests(unittest.TestCase):
                 splits["train"]["image_id"].tolist(),
                 repeated["train"]["image_id"].tolist(),
             )
+
+
+class SplitGradeLimitTests(unittest.TestCase):
+    def test_divides_one_thousand_images_per_grade_as_70_15_15(self):
+        limits = split_grade_limits(1000, val_size=0.15, test_size=0.15)
+
+        self.assertEqual(limits, {"train": 700, "val": 150, "test": 150})
+        self.assertEqual(sum(limits.values()), 1000)
 
 
 if __name__ == "__main__":

@@ -34,10 +34,11 @@ Create these private Colab Secrets and grant the notebook access:
 Never paste either token into a notebook cell or commit one to Git. When Colab
 Secrets are unavailable, the notebook uses a hidden session-only prompt.
 
-The notebook uses at most 1,000 images from each grade in every split (up to
-5,000 images each for train, validation and test) so the pipeline can be
-validated before committing to a full-data run. Each sample is deterministic
-for a given `--seed`.
+The notebook uses at most 1,000 images in total from each grade, divided into
+70% train, 15% validation and 15% test. With five complete grades this gives up
+to 3,500 training images and 750 images in each evaluation split. Each sample
+is deterministic for a given `--seed`, and predefined split boundaries remain
+intact.
 
 ## Command-line setup
 
@@ -64,15 +65,16 @@ python -m ai.grading.train \
   --accum-steps 8 \
   --freeze-epochs 3 \
   --epochs 30 \
-  --max-train-images-per-grade 1000 \
-  --max-eval-images-per-grade 1000 \
+  --max-images-per-grade 1000 \
+  --val-size 0.15 \
+  --test-size 0.15 \
   --loss ce \
   --balance none
 ```
 
-The capped training set is balanced when every grade has at least 1,000 images,
-so the baseline uses `--balance none`. Set
-both per-grade limits to `0` only when intentionally returning to the full
+The capped training set is balanced when every grade has at least 700 training
+images, so the baseline uses `--balance none`. Set
+`--max-images-per-grade 0` only when intentionally returning to the full
 training and evaluation sets.
 Use `--balance sampler` only for an intentional ablation. Resume with the same
 arguments plus:
@@ -107,8 +109,9 @@ python -m ai.grading.train \
   --image-size 384 \
   --batch-size 8 \
   --accum-steps 2 \
-  --max-train-images-per-grade 1000 \
-  --max-eval-images-per-grade 1000 \
+  --max-images-per-grade 1000 \
+  --val-size 0.15 \
+  --test-size 0.15 \
   --loss ce \
   --balance none
 ```
