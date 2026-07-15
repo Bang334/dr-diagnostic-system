@@ -38,6 +38,7 @@ from sklearn.metrics import (
     f1_score,
 )
 from sklearn.model_selection import train_test_split
+from timm.layers.pos_embed import resample_abs_pos_embed
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -260,6 +261,40 @@ def build_sampler(labels: list[int]) -> WeightedRandomSampler:
     return WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
 
 
+def resize_pos_embed_for_model(state: dict[str, torch.Tensor], model: nn.Module) -> None:
+    """Resize a ViT checkpoint's spatial position grid to the target model."""
+    source = state.get("pos_embed")
+    target = getattr(model, "pos_embed", None)
+    if source is None or target is None or source.shape == target.shape:
+        return
+
+    if source.ndim != 3 or target.ndim != 3 or source.shape[-1] != target.shape[-1]:
+        return
+
+    grid_size = getattr(getattr(model, "patch_embed", None), "grid_size", None)
+    if grid_size is None:
+        return
+
+    num_prefix_tokens = int(getattr(model, "num_prefix_tokens", 1))
+    resized = resample_abs_pos_embed(
+        source,
+        new_size=list(grid_size),
+        num_prefix_tokens=num_prefix_tokens,
+        interpolation="bicubic",
+        antialias=True,
+    )
+    if resized.shape != target.shape:
+        raise RuntimeError(
+            "Could not resize checkpoint pos_embed from "
+            f"{tuple(source.shape)} to {tuple(target.shape)}"
+        )
+    print(
+        "Resized checkpoint pos_embed from "
+        f"{tuple(source.shape)} to {tuple(resized.shape)}"
+    )
+    state["pos_embed"] = resized
+
+
 def load_retfound_dinov2(args: argparse.Namespace, output_dim: int) -> nn.Module:
     print(f"Loading retina-specific checkpoint {args.retfound_id}")
     hf_token = os.environ.get("HF_TOKEN") or get_token()
@@ -291,6 +326,7 @@ def load_retfound_dinov2(args: argparse.Namespace, output_dim: int) -> nn.Module
     for key in ("head.weight", "head.bias"):
         if key in state and key in current and state[key].shape != current[key].shape:
             del state[key]
+    resize_pos_embed_for_model(state, model)
     incompatible = model.load_state_dict(state, strict=False)
     print(
         f"Loaded RETFound backbone; missing={len(incompatible.missing_keys)}, "
