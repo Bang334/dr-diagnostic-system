@@ -1,118 +1,159 @@
-import cv2
-import numpy as np
+"""Shared fundus preprocessing for training and inference.
+
+The default path deliberately preserves RGB colour.  Green-channel-only
+preprocessing is useful for some lesion-segmentation experiments, but it throws
+away colour information that a pretrained grading backbone expects.
+"""
+
+from __future__ import annotations
+
+import argparse
 import glob
 import os
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+from typing import Iterable, Tuple
+
+import cv2
+import numpy as np
 from tqdm import tqdm
-import argparse
 
-def crop_image_from_gray(img, tol=7):
-    """
-    Cắt bỏ phần viền đen thừa xung quanh ảnh đáy mắt.
-    Dựa trên việc tìm mask của các pixel có giá trị > tol.
-    """
-    if img.ndim == 2:
-        mask = img > tol
-        return img[np.ix_(mask.any(1), mask.any(0))]
-    elif img.ndim == 3:
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        mask = gray_img > tol
-        check_shape = img[:, :, 0][np.ix_(mask.any(1), mask.any(0))].shape[0]
-        if check_shape == 0:
-            return img # Toàn ảnh đen, trả về ảnh gốc
-        else:
-            img1 = img[:, :, 0][np.ix_(mask.any(1), mask.any(0))]
-            img2 = img[:, :, 1][np.ix_(mask.any(1), mask.any(0))]
-            img3 = img[:, :, 2][np.ix_(mask.any(1), mask.any(0))]
-            img = np.dstack([img1, img2, img3])
-        return img
 
-def preprocess_fundus_image(image_path, img_size=512):
+def crop_image_from_gray(image: np.ndarray, tol: int = 7) -> np.ndarray:
+    """Remove the black camera border while preserving every colour channel."""
+    if image is None or image.size == 0:
+        raise ValueError("Fundus image is empty")
+
+    if image.ndim == 2:
+        gray = image
+    elif image.ndim == 3 and image.shape[2] == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        raise ValueError(f"Expected HxW or HxWx3 image, received {image.shape}")
+
+    mask = gray > tol
+    if not mask.any():
+        return image.copy()
+
+    rows = np.flatnonzero(mask.any(axis=1))
+    cols = np.flatnonzero(mask.any(axis=0))
+    return image[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1].copy()
+
+
+def ben_graham_enhance(image_bgr: np.ndarray, sigma: float = 10.0) -> np.ndarray:
+    """Correct uneven illumination without collapsing the image to grayscale."""
+    blurred = cv2.GaussianBlur(image_bgr, (0, 0), sigmaX=sigma)
+    return cv2.addWeighted(image_bgr, 4.0, blurred, -4.0, 128.0)
+
+
+def preprocess_fundus_array(
+    image_bgr: np.ndarray,
+    img_size: int | Tuple[int, int] | None = None,
+    *,
+    enhance: bool = False,
+    crop_tolerance: int = 7,
+) -> np.ndarray:
+    """Crop a BGR fundus image, optionally enhance it, and resize it.
+
+    The return value remains BGR so OpenCV callers do not silently swap colour
+    channels.  Conversion to RGB belongs at the model boundary.
     """
-    Thực hiện pipeline tiền xử lý:
-    1. Cắt viền đen
-    2. Resize
-    3. Trích xuất kênh Green
-    4. CLAHE
-    5. Ben Graham
-    """
-    img = cv2.imread(image_path)
-    if img is None:
+    image = crop_image_from_gray(image_bgr, tol=crop_tolerance)
+    if enhance:
+        image = ben_graham_enhance(image)
+
+    if img_size is not None:
+        size = (img_size, img_size) if isinstance(img_size, int) else img_size
+        image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    return image
+
+
+def preprocess_fundus_image(
+    image_path: str | os.PathLike[str],
+    img_size: int = 512,
+    *,
+    enhance: bool = False,
+) -> np.ndarray | None:
+    """Read and preprocess one fundus image while preserving RGB information."""
+    image = cv2.imread(os.fspath(image_path), cv2.IMREAD_COLOR)
+    if image is None:
         return None
-        
-    # 1. Cắt viền đen và Resize
-    img = crop_image_from_gray(img)
-    img = cv2.resize(img, (img_size, img_size))
-    
-    # 2. Trích xuất kênh Green
-    # OpenCV đọc ảnh theo thứ tự BGR
-    b, g, r = cv2.split(img)
-    
-    # 3. CLAHE (Contrast Limited Adaptive Histogram Equalization) trên kênh Green
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    g_clahe = clahe.apply(g)
-    
-    # 4. Ben Graham Preprocessing
-    # Công thức: original * 4 - gaussian_blur * 4 + 128
-    # Kỹ thuật này giúp khử sáng không đều và làm nổi bật mạch máu/tổn thương
-    gaussian = cv2.GaussianBlur(g_clahe, (0, 0), sigmaX=30)
-    img_bg = cv2.addWeighted(g_clahe, 4, gaussian, -4, 128)
-    
-    # 5. Nhân bản lên 3 kênh để tương thích với input của các mạng CNN (ResNet, EfficientNet,...)
-    final_img = cv2.merge([img_bg, img_bg, img_bg])
-    
-    return final_img
+    return preprocess_fundus_array(image, img_size, enhance=enhance)
 
-def process_single_file(args):
-    src_path, dst_path, img_size = args
-    # Nếu file đã tồn tại thì bỏ qua (hỗ trợ resume khi bị đứt gánh)
+
+def _process_single_file(task: tuple[str, str, int, bool]) -> bool:
+    src_path, dst_path, img_size, enhance = task
     if os.path.exists(dst_path):
         return True
-        
-    img = preprocess_fundus_image(src_path, img_size)
-    if img is not None:
-        cv2.imwrite(dst_path, img)
-        return True
-    return False
 
-def batch_process(src_dir, dst_dir, img_size=512, ext='*.png', num_workers=4):
-    """
-    Xử lý song song toàn bộ ảnh trong thư mục.
-    """
-    os.makedirs(dst_dir, exist_ok=True)
-    
-    # Hỗ trợ nhiều định dạng ảnh (.png, .jpeg, .jpg)
-    search_path = os.path.join(src_dir, ext)
-    image_paths = glob.glob(search_path)
-    
-    if len(image_paths) == 0:
-        print(f"[!] Không tìm thấy ảnh nào tại: {search_path}")
+    image = preprocess_fundus_image(src_path, img_size, enhance=enhance)
+    if image is None:
+        return False
+    return bool(cv2.imwrite(dst_path, image))
+
+
+def _find_images(src_dir: str, pattern: str) -> Iterable[str]:
+    if pattern != "auto":
+        return glob.glob(os.path.join(src_dir, pattern))
+    paths: list[str] = []
+    for extension in ("*.png", "*.jpg", "*.jpeg"):
+        paths.extend(glob.glob(os.path.join(src_dir, extension)))
+    return sorted(paths)
+
+
+def batch_process(
+    src_dir: str,
+    dst_dir: str,
+    img_size: int = 512,
+    ext: str = "auto",
+    num_workers: int = 4,
+    *,
+    enhance: bool = False,
+) -> None:
+    """Preprocess a directory; existing output files make the job resumable."""
+    Path(dst_dir).mkdir(parents=True, exist_ok=True)
+    image_paths = list(_find_images(src_dir, ext))
+    if not image_paths:
+        print(f"[!] No images found in {src_dir!r} with pattern {ext!r}")
         return
-        
-    print(f"[*] Tìm thấy {len(image_paths)} ảnh. Đang tiến hành tiền xử lý ({img_size}x{img_size})...")
-    
-    tasks = []
-    for src_path in image_paths:
-        filename = os.path.basename(src_path)
-        dst_path = os.path.join(dst_dir, filename)
-        tasks.append((src_path, dst_path, img_size))
-        
-    # Xử lý đa luồng giúp CPU chạy 100% thay vì chạy 1 luồng rất lâu
+
+    tasks = [
+        (path, os.path.join(dst_dir, os.path.basename(path)), img_size, enhance)
+        for path in image_paths
+    ]
     success_count = 0
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        for result in tqdm(executor.map(process_single_file, tasks), total=len(tasks), desc="Processing"):
-            if result:
-                success_count += 1
-                
-    print(f"[v] Hoàn tất! Đã xử lý thành công {success_count}/{len(tasks)} ảnh.")
+        for succeeded in tqdm(
+            executor.map(_process_single_file, tasks),
+            total=len(tasks),
+            desc="Preprocessing",
+        ):
+            success_count += int(succeeded)
+    print(f"[v] Processed {success_count}/{len(tasks)} images")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Script tiền xử lý hàng loạt ảnh đáy mắt (DR Grading).")
-    parser.add_argument("--src", type=str, required=True, help="Thư mục chứa ảnh gốc (raw)")
-    parser.add_argument("--dst", type=str, required=True, help="Thư mục lưu ảnh đã xử lý (processed)")
-    parser.add_argument("--size", type=int, default=512, help="Kích thước ảnh đầu ra (mặc định: 512)")
-    parser.add_argument("--ext", type=str, default="*.png", help="Định dạng ảnh cần tìm (VD: *.png, *.jpeg)")
-    parser.add_argument("--workers", type=int, default=4, help="Số luồng CPU sử dụng (mặc định: 4)")
-    
+    parser = argparse.ArgumentParser(description="Preprocess retinal fundus images")
+    parser.add_argument("--src", required=True, help="Directory containing raw images")
+    parser.add_argument("--dst", required=True, help="Output directory")
+    parser.add_argument("--size", type=int, default=512)
+    parser.add_argument(
+        "--ext",
+        default="auto",
+        help="Glob such as '*.png'; 'auto' reads PNG/JPG/JPEG",
+    )
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--enhance",
+        action="store_true",
+        help="Apply colour-preserving Ben Graham illumination correction",
+    )
     args = parser.parse_args()
-    batch_process(args.src, args.dst, args.size, args.ext, args.workers)
+    batch_process(
+        args.src,
+        args.dst,
+        args.size,
+        args.ext,
+        args.workers,
+        enhance=args.enhance,
+    )

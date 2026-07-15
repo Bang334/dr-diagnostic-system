@@ -12,7 +12,7 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from ai.preprocessing.fundus_prep import preprocess_fundus_image
+from ai.preprocessing.fundus_prep import preprocess_fundus_array
 from ai.grading.model_handler import DRModelHandler
 
 app = FastAPI(
@@ -32,7 +32,10 @@ app.add_middleware(
 # Khởi tạo thư mục chứa model trọng số
 WEIGHTS_DIR = os.path.join(project_root, "ai", "weights")
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
-MODEL_PATH = os.path.join(WEIGHTS_DIR, "dr_grading_model.keras")
+MODEL_PATH = os.environ.get(
+    "DR_MODEL_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_model.keras")
+)
+PREPROCESS_ENHANCE = os.environ.get("DR_PREPROCESS_ENHANCE", "0") == "1"
 
 # Khởi tạo thư mục tạm để lưu ảnh upload
 TEMP_DIR = os.path.join(project_root, "ai", "grading", "temp_uploads")
@@ -47,13 +50,10 @@ async def startup_event():
     global dr_model
     print("=== ĐANG KHỞI ĐỘNG DR GRADING API ===")
     
-    # Tạo sẵn file h5 rỗng nếu chưa có để tránh lỗi sập server (người dùng sẽ thay file thật sau)
     if not os.path.exists(MODEL_PATH):
         print(f"[!] Chưa có file model tại {MODEL_PATH}")
         print("[!] Bạn hãy copy file model thật của bạn đè lên đường dẫn này nhé.")
-        open(MODEL_PATH, 'a').close() 
 
-    # Khởi tạo Model Handler (chưa load thật nếu file rỗng, nhưng giữ cấu trúc chạy)
     dr_model = DRModelHandler(model_path=MODEL_PATH)
 
 @app.get("/")
@@ -102,12 +102,16 @@ async def analyze_fundus(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(content)
             
-        # SỬ DỤNG OPENCV ĐỌC ẢNH GỐC CHO KHỚP VỚI LÚC TRAIN (KHÔNG DÙNG BEN GRAHAM)
         img = cv2.imread(temp_path)
         if img is None:
             raise HTTPException(status_code=400, detail="Không thể đọc hoặc xử lý ảnh. Ảnh có thể bị hỏng.")
-            
-        preprocessed_img = img # Giữ nguyên ảnh gốc
+
+        # The same colour-preserving crop/resize is used by ai/grading/train.py.
+        preprocessed_img = preprocess_fundus_array(
+            img,
+            img_size=dr_model.input_size[0],
+            enhance=PREPROCESS_ENHANCE,
+        )
 
         # 4. Dự đoán qua Model (Inference)
         result = dr_model.predict(preprocessed_img)
@@ -119,6 +123,8 @@ async def analyze_fundus(file: UploadFile = File(...)):
         
         return JSONResponse(content=result)
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi hệ thống trong quá trình phân tích: {str(e)}")
         

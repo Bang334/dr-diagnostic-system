@@ -24,7 +24,7 @@ class DRModelHandler:
         self._load_model()
         
     def _load_model(self):
-        if not os.path.exists(self.model_path):
+        if not os.path.exists(self.model_path) or os.path.getsize(self.model_path) == 0:
             print(f"[!] CẢNH BÁO: Không tìm thấy file model tại {self.model_path}")
             print("[!] Vui lòng copy file model (.keras) của bạn vào đường dẫn này.")
             return
@@ -38,8 +38,10 @@ class DRModelHandler:
             from tensorflow.keras.applications import EfficientNetB3
             
             data_augmentation = models.Sequential([
-                layers.RandomFlip("horizontal_and_vertical"),
-                layers.RandomRotation(0.2),
+                # Kept for checkpoint compatibility. These layers are disabled
+                # automatically during model.predict().
+                layers.RandomFlip("horizontal"),
+                layers.RandomRotation(0.05),
                 layers.RandomZoom((-0.1, 0.1)),
             ], name="data_augmentation")
 
@@ -47,6 +49,8 @@ class DRModelHandler:
             x = data_augmentation(inputs)
             x = layers.Lambda(effnet_preprocess, name="preprocess_input")(x)
             
+            # In inference the complete trained checkpoint is loaded below, so
+            # downloading ImageNet weights here would be redundant.
             base_model = EfficientNetB3(weights=None, include_top=False, input_shape=(300, 300, 3))
             x = base_model(x, training=False)
 
@@ -79,7 +83,7 @@ class DRModelHandler:
             
         import cv2
         
-        # Đảm bảo kích thước đúng 224x224 như model yêu cầu
+        # Match the input size used by this checkpoint.
         img_resized = cv2.resize(preprocessed_img, self.input_size)
         
         # Chuyển BGR (OpenCV mặc định) sang RGB (TensorFlow/Keras thường dùng)
@@ -91,11 +95,11 @@ class DRModelHandler:
         # thì bạn cần bật cờ normalize ở đây. Giả định model tự xử lý hoặc đã chuẩn hóa.
         img_tensor = img_rgb.astype('float32')
         
-        # Keras yêu cầu input có batch dimension (shape: 1, 224, 224, 3)
+        # Keras requires a batch dimension.
         img_batch = np.expand_dims(img_tensor, axis=0)
         
         # Chạy inference
-        predictions = self.model.predict(img_batch)
+        predictions = self.model.predict(img_batch, verbose=0)
         
         # predictions thường là mảng 2 chiều [[prob0, prob1, prob2, prob3, prob4]]
         # Nếu mô hình trả về logit, hàm tính xác suất sẽ phải dùng Softmax, 
@@ -103,7 +107,10 @@ class DRModelHandler:
         probs = predictions[0].tolist()
         
         # Đảm bảo tổng xác suất = 1 (tránh sai số float)
-        probs = [float(p) / sum(probs) for p in probs]
+        probability_sum = sum(probs)
+        if probability_sum <= 0:
+            raise ValueError("Model returned invalid probabilities")
+        probs = [float(p) / probability_sum for p in probs]
         
         # Lấy class có xác suất cao nhất
         predicted_class = int(np.argmax(probs))
