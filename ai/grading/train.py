@@ -81,10 +81,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-train-images-per-grade",
         type=int,
-        default=500,
+        default=1000,
         help=(
-            "Maximum training images sampled for each DR grade (default: 500); "
+            "Maximum training images sampled for each DR grade (default: 1000); "
             "use 0 to train on every available image"
+        ),
+    )
+    parser.add_argument(
+        "--max-eval-images-per-grade",
+        type=int,
+        default=1000,
+        help=(
+            "Maximum validation/test images sampled for each DR grade "
+            "(default: 1000); use 0 to evaluate every available image"
         ),
     )
 
@@ -162,6 +171,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("accum-steps must be at least 1")
     if args.max_train_images_per_grade < 0:
         raise ValueError("max-train-images-per-grade cannot be negative")
+    if args.max_eval_images_per_grade < 0:
+        raise ValueError("max-eval-images-per-grade cannot be negative")
 
 
 def seed_everything(seed: int) -> None:
@@ -180,13 +191,15 @@ def load_or_create_csv_splits(args: argparse.Namespace) -> dict[str, pd.DataFram
     if all(path.exists() for path in paths.values()):
         print(f"Reusing fixed splits from {split_dir}")
         splits = {name: pd.read_csv(path) for name, path in paths.items()}
-        splits["train"] = limit_samples_per_grade(
-            splits["train"],
+        splits = limit_splits_per_grade(
+            splits,
             args.label_column,
             args.max_train_images_per_grade,
+            args.max_eval_images_per_grade,
             args.seed,
         )
-        splits["train"].to_csv(paths["train"], index=False)
+        for name, split in splits.items():
+            split.to_csv(paths[name], index=False)
         return splits
 
     frame = pd.read_csv(args.labels_csv)
@@ -218,10 +231,11 @@ def load_or_create_csv_splits(args: argparse.Namespace) -> dict[str, pd.DataFram
         "val": val.reset_index(drop=True),
         "test": test.reset_index(drop=True),
     }
-    splits["train"] = limit_samples_per_grade(
-        splits["train"],
+    splits = limit_splits_per_grade(
+        splits,
         args.label_column,
         args.max_train_images_per_grade,
+        args.max_eval_images_per_grade,
         args.seed,
     )
     for name, split in splits.items():
@@ -342,6 +356,35 @@ def limit_samples_per_grade(
     return sampled.sort_values(sort_column, kind="stable").reset_index(drop=True)
 
 
+def limit_splits_per_grade(
+    splits: dict[str, pd.DataFrame],
+    label_column: str,
+    max_train_per_grade: int,
+    max_eval_per_grade: int,
+    seed: int,
+) -> dict[str, pd.DataFrame]:
+    """Apply deterministic per-grade limits to train, validation and test."""
+    limited: dict[str, pd.DataFrame] = {}
+    seed_offsets = {"train": 0, "val": 1000, "test": 2000}
+    for name, split in splits.items():
+        max_per_grade = (
+            max_train_per_grade if name == "train" else max_eval_per_grade
+        )
+        original_size = len(split)
+        limited[name] = limit_samples_per_grade(
+            split,
+            label_column,
+            max_per_grade,
+            seed + seed_offsets.get(name, 0),
+        )
+        if max_per_grade:
+            print(
+                f"Limited {name} split from {original_size} to {len(limited[name])} "
+                f"images (at most {max_per_grade} per grade; seed={seed})"
+            )
+    return limited
+
+
 def load_predefined_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
     split_paths = find_predefined_splits(args.dataset_dir)
     dataset_root = next(iter(split_paths.values())).parent
@@ -355,16 +398,13 @@ def load_predefined_splits(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
             for name, split in splits.items()
         }
 
-    max_per_grade = args.max_train_images_per_grade
-    original_train_size = len(splits["train"])
-    splits["train"] = limit_samples_per_grade(
-        splits["train"], args.label_column, max_per_grade, args.seed
+    splits = limit_splits_per_grade(
+        splits,
+        args.label_column,
+        args.max_train_images_per_grade,
+        args.max_eval_images_per_grade,
+        args.seed,
     )
-    if max_per_grade:
-        print(
-            f"Limited train split from {original_train_size} to {len(splits['train'])} "
-            f"images (at most {max_per_grade} per grade; seed={args.seed})"
-        )
 
     all_paths: list[str] = []
     manifest_dir = args.split_dir or (args.output_dir / "splits")

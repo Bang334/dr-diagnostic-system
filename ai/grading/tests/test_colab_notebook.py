@@ -32,6 +32,9 @@ class ColabNotebookDownloadTests(unittest.TestCase):
         self.assertNotIn("split_names = ('train', 'validation', 'test')", source)
         self.assertIn('"--dataset-dir"', train_source)
         self.assertIn('"--max-train-images-per-grade"', train_source)
+        self.assertIn('"--max-eval-images-per-grade"', train_source)
+        config_source = "".join(notebook["cells"][4]["source"])
+        self.assertIn("MAX_IMAGES_PER_GRADE = 1000", config_source)
         self.assertNotIn('"--images-dir"', train_source)
 
     def test_download_cell_accepts_kaggle_val_directory(self):
