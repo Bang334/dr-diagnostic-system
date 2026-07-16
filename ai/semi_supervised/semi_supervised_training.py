@@ -7,6 +7,9 @@ split is discovered only to enforce separation and is never evaluated here.
 
 from __future__ import annotations
 
+import sys
+sys.stdout.reconfigure(line_buffering=True)  # flush mỗi dòng, tránh bị im lặng khi chạy qua subprocess
+
 import argparse
 import json
 import math
@@ -129,7 +132,7 @@ def generate_pseudo_labels(
 ) -> pd.DataFrame:
     model.eval()
     records: List[Dict[str, Any]] = []
-    for images, paths in tqdm(loader, desc="pseudo-label", leave=False):
+    for images, paths in tqdm(loader, desc="pseudo-label", leave=True):
         images = images.to(device, non_blocking=True)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
             probabilities = torch.softmax(model(images), dim=1)
@@ -214,17 +217,25 @@ def train_one_epoch(
 
 
 def run(args: argparse.Namespace) -> None:
+    print("[1/7] Validating arguments...")
     validate_args(args)
     args.output_dir = prepare_fresh_output_dir(args.output_dir)
     seed_everything(args.seed)
+
+    print("[2/7] Checking CUDA availability...")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required for RETFound semi-supervised training")
     device = torch.device("cuda")
     amp_enabled = not args.no_amp
+    print(f"       GPU: {torch.cuda.get_device_name(0)}, AMP: {amp_enabled}")
 
+    print(f"[3/7] Loading checkpoint: {args.checkpoint}")
     bundle = load_grading_checkpoint(args.checkpoint, device, require_ce=True)
     model, saved_args = bundle.model, bundle.saved_args
     image_size = int(getattr(saved_args, "image_size", 224))
+    print(f"       Image size: {image_size}")
+
+    print("[4/7] Loading dataset splits and discovering unlabeled images...")
     frames, _ = load_split_frames(args.dataset_dir)
     unlabeled_paths = discover_images(args.unlabeled_dir)
     assert_unlabeled_is_external(unlabeled_paths, frames)
@@ -259,6 +270,8 @@ def run(args: argparse.Namespace) -> None:
     print(f"External unlabeled images: {len(unlabeled_dataset):,}")
     print("Held-out test split is not loaded into a DataLoader.")
 
+    print(f"[5/7] Generating pseudo-labels (threshold={args.threshold}, max_per_class={args.max_pseudo_per_class})...")
+    print(f"       Running inference on {len(unlabeled_dataset):,} unlabeled images — this may take several minutes...")
     pseudo_frame = generate_pseudo_labels(
         model,
         unlabeled_loader,
@@ -274,7 +287,7 @@ def run(args: argparse.Namespace) -> None:
         )
     pseudo_frame.to_csv(args.output_dir / "pseudo_labels.csv", index=False)
     counts = pseudo_frame["pseudo_label"].value_counts().sort_index().to_dict()
-    print(f"Accepted pseudo-labels: {len(pseudo_frame):,}; per class: {counts}")
+    print(f"       Accepted pseudo-labels: {len(pseudo_frame):,}; per class: {counts}")
 
     pseudo_dataset = PseudoLabeledFundusDataset(
         pseudo_frame,
@@ -296,6 +309,7 @@ def run(args: argparse.Namespace) -> None:
     )
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    print("[6/7] Evaluating parent checkpoint on validation set...")
     baseline_loss, targets, predictions, _ = evaluate(
         model, val_loader, criterion, device, "ce", amp_enabled
     )
@@ -303,7 +317,7 @@ def run(args: argparse.Namespace) -> None:
     best_qwk = float(baseline_metrics["qwk"])
     if not math.isfinite(best_qwk):
         raise RuntimeError("Parent checkpoint produced a non-finite validation QWK")
-    print(f"Parent checkpoint validation QWK: {best_qwk:.6f}")
+    print(f"       Parent checkpoint validation QWK: {best_qwk:.6f}")
 
     metadata = {
         "research_method": "pseudo_labeling",
@@ -337,7 +351,9 @@ def run(args: argparse.Namespace) -> None:
     stale_epochs = 0
     best_epoch = -1
 
+    print(f"[7/7] Starting semi-supervised training for {args.epochs} epochs (patience={args.patience})...")
     for epoch in range(args.epochs):
+        print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
         train_loss = train_one_epoch(
             model,
             train_loader,
