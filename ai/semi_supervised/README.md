@@ -21,9 +21,11 @@ fundus_dataset/
 ```
 
 - Semi-supervised chỉ tối ưu trên `train` và ảnh ngoài chưa có nhãn.
-- Few-shot lấy episode huấn luyện từ `train` và episode chọn model từ `val`.
-- `test` chỉ được dò để kiểm tra tách biệt; hai script không tạo DataLoader cho
-  test và không báo metric test.
+- Few-shot chọn đúng `K` ảnh mỗi lớp từ `train` làm support cố định; `val` không
+  được dùng để tránh tăng ngân sách nhãn target.
+- Semi-supervised không nạp `test`. Few-shot chỉ đánh giá `test` target trước và
+  sau thích nghi; không dùng metric test để train, early stopping hoặc chọn
+  checkpoint.
 - Thư mục ảnh chưa nhãn phải là nguồn ngoài, không được trỏ vào `train`, `val`
   hoặc `test`. Script chặn các đường dẫn bị trùng.
 - Nếu dữ liệu có hai mắt của cùng bệnh nhân, split phải được tạo theo bệnh nhân
@@ -71,24 +73,43 @@ Các artifact chính:
 Nếu không ảnh nào vượt threshold, script dừng thay vì tự hạ ngưỡng. Hãy kiểm tra
 calibration và domain ảnh ngoài trước khi chọn ngưỡng thấp hơn.
 
-## Few-shot episodic training
+## Few-shot target-domain adaptation
 
-`few_shot_demo.py` nay chạy ảnh thật. RETFound là encoder, projection head mới
-được huấn luyện theo ProtoNet; mặc định chỉ block transformer cuối và các lớp
-norm của encoder được mở.
+`few_shot_demo.py` mô phỏng tình huống model nguồn được huấn luyện tại một quốc
+gia/bệnh viện rồi thích nghi tại nơi mới bằng rất ít nhãn. Dataset target phải
+hoàn toàn chưa xuất hiện khi train checkpoint nguồn và vẫn có năm DR grade
+`0..4`.
+
+Script chọn support một lần, đúng `K` ảnh/lớp, lưu vào `support_manifest.csv` và
+chỉ tạo leave-one-out episode trong tập cố định này. Mặc định embedding RETFound
+được giữ nguyên chiều và chỉ block transformer cuối cùng cùng các lớp norm được
+mở. Target `val` không tham gia chọn model; target `test` chỉ báo cáo:
+
+1. classifier nguồn chưa dùng nhãn target;
+2. ProtoNet dùng support nhưng chưa gradient adaptation;
+3. ProtoNet sau gradient adaptation trên support.
 
 ```powershell
 python -m ai.semi_supervised.few_shot_demo `
   --checkpoint D:\checkpoints\checkpoint-best.pth `
-  --dataset-dir D:\data\fundus_merged `
-  --output-dir D:\runs\retfound_fewshot_v1 `
+  --target-dataset-dir D:\data\foreign_hospital_target `
+  --output-dir D:\runs\retfound_target_5shot_seed42 `
   --shots 5 `
-  --queries 3
+  --queries 1 `
+  --seed 42
 ```
 
-Artifact `checkpoint-best-protonet.pth` cần support set khi inference và không
-tương thích trực tiếp với API grading năm lớp. Không sao chép artifact này vào
-`ai/weights` của production.
+Các artifact chính:
+
+- `support_manifest.csv`: bằng chứng model chỉ thấy đúng `K × 5` ảnh target;
+- `comparison.json`: metric trước/sau trên cùng target test;
+- `checkpoint-adapted-protonet.pth`: lưu encoder, projection và prototype;
+- `history.jsonl` và `summary.json`: loss support và kiểm tra chống test leakage.
+
+Checkpoint đã lưu prototype nên không cần đọc lại support tại inference, nhưng
+chưa tương thích trực tiếp với API grading năm lớp. Không sao chép artifact này
+vào `ai/weights` production trước khi có adapter inference và kiểm định nhiều
+seed/domain.
 
 ## Chạy trên Colab/Drive
 
@@ -97,11 +118,12 @@ Notebook sẽ:
 1. mount Google Drive;
 2. clone/pull đúng branch;
 3. dò các file `checkpoint-best.pth` trên Drive;
-4. mặc định tự tải dataset fundus gộp từ Kaggle giống notebook grading, hoặc
-   nhận thư mục/ZIP có sẵn;
+4. với semi, mặc định tự tải dataset fundus gộp từ Kaggle làm labeled replay;
+   với few-shot, bắt buộc nhập dataset target mới có split cố định;
 5. nhận nguồn ảnh chưa nhãn từ `kaggle:owner/dataset`, thư mục hoặc ZIP khi chạy
    semi-supervised;
-6. lưu mỗi phương pháp vào output directory riêng trên Drive.
+6. lưu mỗi phương pháp vào output directory riêng trên Drive và hiển thị
+   `support_manifest.csv`/`comparison.json` sau run few-shot.
 
 Script từ chối output directory đã có artifact để tránh nối lẫn hai run hoặc
 ghi đè checkpoint cũ. Khi chạy lại, hãy đổi `Tên run` trong notebook.

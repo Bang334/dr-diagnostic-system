@@ -10,9 +10,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from ai.semi_supervised.few_shot_demo import (
-    EpisodeSampler,
+    FixedSupportEpisodeSampler,
     RetfoundProtoNet,
     parse_args as parse_few_shot_args,
+    select_fixed_support,
 )
 from ai.semi_supervised.research_utils import (
     assert_unlabeled_is_external,
@@ -50,14 +51,15 @@ class ArgumentDefaultTests(unittest.TestCase):
             [
                 "--checkpoint",
                 "best.pth",
-                "--dataset-dir",
+                "--target-dataset-dir",
                 "dataset",
                 "--output-dir",
                 "output",
             ]
         )
         self.assertEqual(args.shots, 5)
-        self.assertEqual(args.queries, 3)
+        self.assertEqual(args.queries, 1)
+        self.assertEqual(args.embedding_dim, 0)
         self.assertEqual(args.unfreeze_last_blocks, 1)
         self.assertEqual(args.encoder_lr, 1e-6)
 
@@ -152,27 +154,39 @@ class DataSeparationTests(unittest.TestCase):
                 prepare_fresh_output_dir(output)
 
 
-class EpisodeSamplerTests(unittest.TestCase):
-    def test_samples_balanced_disjoint_support_and_query_sets(self):
+class FixedSupportTests(unittest.TestCase):
+    def test_selects_exactly_k_images_per_class_once(self):
         frame = pd.DataFrame(
             {
-                "diagnosis": [grade for grade in range(5) for _ in range(10)]
+                "image_path": [f"{grade}_{index}.jpg" for grade in range(5) for index in range(10)],
+                "diagnosis": [grade for grade in range(5) for _ in range(10)],
             }
         )
-        sampler = EpisodeSampler(frame, seed=42)
-        support, support_labels, query, query_labels = sampler.sample(2, 3)
-        self.assertEqual(len(support), 10)
-        self.assertEqual(len(query), 15)
+        first = select_fixed_support(frame, shots=2, seed=42)
+        second = select_fixed_support(frame, shots=2, seed=42)
+        self.assertEqual(len(first), 10)
+        self.assertEqual(first["diagnosis"].value_counts().sort_index().tolist(), [2] * 5)
+        self.assertEqual(first["image_path"].tolist(), second["image_path"].tolist())
+
+    def test_episode_only_reuses_fixed_support_and_has_disjoint_query(self):
+        fixed = pd.DataFrame(
+            {"diagnosis": [grade for grade in range(5) for _ in range(5)]}
+        )
+        sampler = FixedSupportEpisodeSampler(fixed, seed=42)
+        support, support_labels, query, query_labels = sampler.sample(1)
+        self.assertEqual(len(support), 20)
+        self.assertEqual(len(query), 5)
         self.assertTrue(set(support).isdisjoint(query))
-        self.assertEqual([support_labels.count(grade) for grade in range(5)], [2] * 5)
-        self.assertEqual([query_labels.count(grade) for grade in range(5)], [3] * 5)
+        self.assertEqual([support_labels.count(grade) for grade in range(5)], [4] * 5)
+        self.assertEqual([query_labels.count(grade) for grade in range(5)], [1] * 5)
+        self.assertTrue(set(support + query).issubset(set(fixed.index)))
 
     def test_rejects_class_with_too_few_images(self):
         frame = pd.DataFrame(
             {"diagnosis": [grade for grade in range(5) for _ in range(2)]}
         )
-        with self.assertRaisesRegex(ValueError, "episode needs"):
-            EpisodeSampler(frame, seed=1).sample(2, 1)
+        with self.assertRaisesRegex(ValueError, "needs at least"):
+            select_fixed_support(frame, shots=3, seed=1)
 
 
 class _ToyEncoder(nn.Module):
