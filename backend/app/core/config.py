@@ -36,8 +36,18 @@ class Settings:
     )
     
     # Các cổng dịch vụ AI
-    AI_GRADING_SERVICE_URL: str = os.getenv("AI_GRADING_SERVICE_URL", "http://localhost:8001")
-    AI_SEGMENTATION_SERVICE_URL: str = os.getenv("AI_SEGMENTATION_SERVICE_URL", "http://localhost:8002")
+    AI_GRADING_SERVICE_URL: str = os.getenv("AI_GRADING_SERVICE_URL", "local")
+    AI_SEGMENTATION_SERVICE_URL: str = os.getenv("AI_SEGMENTATION_SERVICE_URL", "disabled")
     AI_REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", 120))
+
+    # Local RETFound-DINOv2 grading checkpoint used by /api/v1/diagnosis/analyze.
+    DR_MODEL_PATH: str = os.getenv(
+        "DR_MODEL_PATH", str(BASE_DIR / "checkpoint-best.pth")
+    )
+    DR_DEVICE: str = os.getenv("DR_DEVICE", "auto")
+    DR_PREPROCESS_ENHANCE: bool = os.getenv("DR_PREPROCESS_ENHANCE", "0") == "1"
+    DR_MAX_UPLOAD_BYTES: int = int(
+        os.getenv("DR_MAX_UPLOAD_BYTES", 20 * 1024 * 1024)
+    )
 
 settings = Settings()

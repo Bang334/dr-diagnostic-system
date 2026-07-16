@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 from typing import Any, Dict
 
@@ -10,6 +11,44 @@ from app.clinical.models import GradingResult, Lesion, SegmentationResult
 
 class AIServiceUnavailable(RuntimeError):
     pass
+
+
+class LocalGradingAdapter:
+    """Run the bundled RETFound checkpoint without a second HTTP service."""
+
+    async def predict(self, image_bytes: bytes, eye: str) -> GradingResult:
+        from app.services.dr_inference import DRInferenceError, get_dr_inference_service
+
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(
+                None,
+                get_dr_inference_service().predict,
+                image_bytes,
+            )
+        except DRInferenceError as exc:
+            raise AIServiceUnavailable(f"Local grading model failed: {exc}") from exc
+        return GradingResult(
+            dr_grade=int(data["dr_grade"]),
+            dr_label=str(data["dr_label"]),
+            confidence=float(data["confidence"]),
+            probabilities=data["probabilities"],
+            model_version=str(data["model_version"]),
+        )
+
+
+class UnavailableSegmentationAdapter:
+    """Explicit safe fallback when no lesion-segmentation model is configured."""
+
+    async def predict(self, image_bytes: bytes, eye: str) -> SegmentationResult:
+        return SegmentationResult(
+            lesions=[],
+            lesion_mask_url=None,
+            model_version="not-configured",
+            status="not_available",
+            retinal_thickening_confirmed=None,
+            center_involved_confirmed_by_oct=None,
+        )
 
 
 class HttpGradingAdapter:

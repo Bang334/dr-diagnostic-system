@@ -16,7 +16,8 @@ import {
   QrCode,
   Plus,
   CalendarCheck,
-  ClipboardList
+  ClipboardList,
+  Eye
 } from 'lucide-react';
 import { colors } from './theme/colors';
 import { api } from './services/api';
@@ -31,6 +32,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState('');
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [showPublicDiagnosis, setShowPublicDiagnosis] = useState(false);
 
   // Form states
   const [loginUsername, setLoginUsername] = useState('dr.nguyen');
@@ -177,6 +179,18 @@ function App() {
   }
 
   if (!currentUser) {
+    if (showPublicDiagnosis) {
+      return (
+        <div style={{ minHeight: '100vh', backgroundColor: 'var(--background)', padding: '28px' }}>
+          <main style={{ width: '100%', maxWidth: '1180px', margin: '0 auto' }}>
+            <button className="btn btn-secondary" style={{ marginBottom: '22px' }} onClick={() => setShowPublicDiagnosis(false)}>
+              ← Quay lại đăng nhập
+            </button>
+            <QuickDiagnosisPanel />
+          </main>
+        </div>
+      );
+    }
     return (
       <div style={{ 
         display: 'flex', 
@@ -248,6 +262,9 @@ function App() {
             <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '12px', marginTop: '8px', fontSize: '15px', fontWeight: 'bold' }}>
               Đăng Nhập
             </button>
+            <button type="button" className="btn btn-secondary" style={{ width: '100%', padding: '12px' }} onClick={() => setShowPublicDiagnosis(true)}>
+              Nhận diện nhanh không cần đăng nhập
+            </button>
           </form>
 
           {/* Quick Info Box */}
@@ -273,6 +290,20 @@ function App() {
         </div>
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
+          <button
+            className="btn btn-secondary"
+            style={{
+              justifyContent: 'flex-start',
+              gap: '12px',
+              backgroundColor: activeTab === 'quick-diagnosis' ? 'rgba(13, 148, 136, 0.1)' : 'transparent',
+              color: activeTab === 'quick-diagnosis' ? 'var(--primary)' : 'var(--text-secondary)',
+              border: 'none'
+            }}
+            onClick={() => setActiveTab('quick-diagnosis')}
+          >
+            <Eye size={18} /> Nhận Diện Một Ảnh
+          </button>
+
           <button 
             className="btn btn-secondary" 
             style={{ 
@@ -410,6 +441,8 @@ function App() {
             </div>
           </div>
         )}
+
+        {activeTab === 'quick-diagnosis' && <QuickDiagnosisPanel />}
 
         {activeTab === 'screening' && (
           <div className="animated-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
@@ -670,6 +703,171 @@ function App() {
   );
 }
 
+function QuickDiagnosisPanel() {
+  const [file, setFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  const chooseFile = (event) => {
+    const selected = event.target.files?.[0];
+    setResult(null);
+    setError('');
+    if (!selected) return;
+    if (selected.size > 20 * 1024 * 1024) {
+      setFile(null);
+      setPreviewUrl('');
+      setError('Ảnh vượt quá giới hạn 20 MB.');
+      return;
+    }
+    setFile(selected);
+    setPreviewUrl(URL.createObjectURL(selected));
+  };
+
+  const analyze = async () => {
+    if (!file) return;
+    setIsLoading(true);
+    setError('');
+    setResult(null);
+    try {
+      setResult(await api.analyzeFundus(file));
+    } catch (err) {
+      setError(err.message || 'Không thể nhận diện ảnh.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const gradeInfo = result
+    ? (colors.drGrades[result.dr_grade] || colors.drGrades[0])
+    : null;
+
+  return (
+    <div className="animated-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
+      <div>
+        <h1 style={{ fontSize: '32px', marginBottom: '8px' }}>Nhận diện DR từ một ảnh</h1>
+        <p style={{ color: 'var(--text-secondary)' }}>
+          Tải một ảnh đáy mắt PNG/JPG để phân loại 5 mức ICDR bằng checkpoint RETFound-DINOv2 tốt nhất.
+        </p>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 0.9fr) minmax(0, 1.1fr)', gap: '28px' }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+          <label
+            style={{
+              minHeight: '330px',
+              border: '2px dashed var(--primary)',
+              borderRadius: 'var(--radius-md)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              overflow: 'hidden',
+              background: 'var(--background)',
+            }}
+          >
+            {previewUrl ? (
+              <img src={previewUrl} alt="Ảnh đáy mắt đã chọn" style={{ width: '100%', height: '330px', objectFit: 'contain' }} />
+            ) : (
+              <div style={{ textAlign: 'center', padding: '28px' }}>
+                <UploadCloud size={52} color="var(--primary)" style={{ marginBottom: '14px' }} />
+                <p style={{ fontWeight: '600' }}>Chọn ảnh đáy mắt</p>
+                <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>PNG, JPG hoặc JPEG · tối đa 20 MB</p>
+              </div>
+            )}
+            <input type="file" accept="image/png,image/jpeg" onChange={chooseFile} style={{ display: 'none' }} />
+          </label>
+
+          {file && (
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>
+              <strong>{file.name}</strong> · {(file.size / 1024 / 1024).toFixed(2)} MB
+            </div>
+          )}
+          {error && (
+            <div style={{ display: 'flex', gap: '8px', padding: '12px', borderRadius: 'var(--radius-sm)', background: 'rgba(239, 68, 68, 0.1)', color: '#EF4444', fontSize: '13px' }}>
+              <AlertTriangle size={17} style={{ flexShrink: 0 }} /> {error}
+            </div>
+          )}
+          <button className="btn btn-primary" style={{ padding: '13px' }} disabled={!file || isLoading} onClick={analyze}>
+            {isLoading ? 'Đang nạp model và phân tích...' : 'Phân tích bằng AI'}
+          </button>
+          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+            Lần phân tích đầu tiên có thể lâu hơn vì backend cần nạp checkpoint 1,2 GB vào bộ nhớ.
+          </p>
+        </div>
+
+        <div className="card" style={{ minHeight: '500px', display: 'flex', flexDirection: 'column', justifyContent: result ? 'flex-start' : 'center' }}>
+          {!result && !isLoading && (
+            <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+              <ShieldAlert size={44} style={{ margin: '0 auto 14px' }} />
+              Kết quả dự đoán sẽ hiển thị tại đây.
+            </div>
+          )}
+          {isLoading && (
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ width: '42px', height: '42px', border: '4px solid rgba(13,148,136,0.12)', borderTopColor: 'var(--primary)', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }} />
+              <p style={{ fontWeight: '600' }}>RETFound-DINOv2 đang suy luận</p>
+              <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>Cắt viền đen → chuẩn hóa 224×224 → phân loại ICDR</p>
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            </div>
+          )}
+          {result && gradeInfo && (
+            <div className="animated-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              <div style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: gradeInfo.bg, borderLeft: `5px solid ${gradeInfo.color}` }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                  <div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Kết quả phân loại</div>
+                    <h2 style={{ marginTop: '4px' }}>Grade {result.dr_grade} · {result.dr_label}</h2>
+                  </div>
+                  <span className="badge" style={{ background: gradeInfo.color, color: '#fff', fontSize: '15px', padding: '7px 12px' }}>
+                    {(result.confidence * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <p style={{ fontSize: '13px', marginTop: '10px', color: 'var(--text-secondary)' }}>{gradeInfo.desc}</p>
+              </div>
+
+              <div>
+                <h3 style={{ fontSize: '15px', marginBottom: '12px' }}>Xác suất theo từng mức</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {Object.entries(result.probabilities).map(([label, probability], index) => {
+                    const info = colors.drGrades[index] || colors.drGrades[0];
+                    return (
+                      <div key={label}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
+                          <span>{index} · {label}</span><strong>{(probability * 100).toFixed(1)}%</strong>
+                        </div>
+                        <div style={{ height: '7px', background: 'var(--background)', borderRadius: '999px', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${Math.max(probability * 100, 0.5)}%`, background: info.color, borderRadius: '999px' }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: '12px', alignItems: 'center', paddingTop: '4px' }}>
+                <img src={result.preprocessed_preview_b64} alt="Ảnh sau tiền xử lý" style={{ width: '120px', height: '120px', objectFit: 'cover', borderRadius: '8px' }} />
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  <strong style={{ color: 'var(--text-secondary)' }}>Ảnh model đã nhận</strong><br />
+                  Model: {result.model_version}<br />Thiết bị: {result.device}
+                </div>
+              </div>
+              <div style={{ padding: '12px', background: 'var(--background)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                <strong>Lưu ý:</strong> {result.disclaimer}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RecallsDashboard({ patients }) {
   const [allRecalls, setAllRecalls] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -678,7 +876,6 @@ function RecallsDashboard({ patients }) {
     const fetchAll = async () => {
       setIsLoading(true);
       try {
-        const { api } = await import('./services/api');
         const results = await Promise.all(
           patients.map(p => api.getPatientRecalls(p.id).then(recalls => recalls.map(r => ({ ...r, patient })))
           )

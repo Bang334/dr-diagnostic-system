@@ -34,6 +34,11 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn(
             "kaggle:sehastrajits/fundus-aptosddridirdeyepacsmessidor", source
         )
+        self.assertIn(
+            "kaggle:griffchristenson/unlabeled-retinal-image-dataset", source
+        )
+        self.assertIn("value='retfound_semi'", source)
+        self.assertNotIn("datetime.now()", source)
         self.assertIn("datasets', 'download'", source)
         self.assertIn("userdata.get('KAGGLE_API_TOKEN')", source)
         self.assertIn("Labeled replay:", source)
@@ -57,12 +62,21 @@ class ResearchNotebookTests(unittest.TestCase):
         training_cell = next(
             source
             for source in code_cells
-            if "run_live(cmd)" in source and "last_checkpoint" in source
+            if "# TRAIN NEW: không tự động resume" in source
+        )
+        resume_cell = next(
+            source for source in code_cells if "# RESUME SEMI" in source
         )
         test_cell = next(
             source for source in code_cells if "TEST_CHECKPOINT_KIND" in source
         )
         self.assertNotIn("--eval-only", training_cell)
+        self.assertNotIn("--resume", training_cell)
+        self.assertIn("--resume", resume_cell)
+        self.assertIn("checkpoint-last.pth", resume_cell)
+        self.assertIn("optimizer", resume_cell)
+        self.assertIn("SEMI_CONFIG", training_cell)
+        self.assertIn("SEMI_CONFIG", resume_cell)
         self.assertIn("--eval-only", test_cell)
         self.assertIn("checkpoint-best.pth", test_cell)
         self.assertIn("checkpoint-last.pth", test_cell)

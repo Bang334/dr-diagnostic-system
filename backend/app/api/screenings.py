@@ -10,7 +10,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.clinical.adapters import AIServiceUnavailable, HttpGradingAdapter, HttpSegmentationAdapter
+from app.clinical.adapters import (
+    AIServiceUnavailable,
+    HttpGradingAdapter,
+    HttpSegmentationAdapter,
+    LocalGradingAdapter,
+    UnavailableSegmentationAdapter,
+)
 from app.clinical.analysis import ClinicalAnalysisModule, InvalidFundusSet
 from app.clinical.models import ClinicalContext, EyeImageSet
 from app.clinical.report import clinical_report_pdf
@@ -30,9 +36,19 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 def build_clinical_module() -> ClinicalAnalysisModule:
     timeout = settings.AI_REQUEST_TIMEOUT_SECONDS
+    grading_url = settings.AI_GRADING_SERVICE_URL.strip()
+    segmentation_url = settings.AI_SEGMENTATION_SERVICE_URL.strip()
     return ClinicalAnalysisModule(
-        grading=HttpGradingAdapter(settings.AI_GRADING_SERVICE_URL, timeout),
-        segmentation=HttpSegmentationAdapter(settings.AI_SEGMENTATION_SERVICE_URL, timeout),
+        grading=(
+            LocalGradingAdapter()
+            if grading_url.lower() in {"", "local"}
+            else HttpGradingAdapter(grading_url, timeout)
+        ),
+        segmentation=(
+            UnavailableSegmentationAdapter()
+            if segmentation_url.lower() in {"", "disabled", "none"}
+            else HttpSegmentationAdapter(segmentation_url, timeout)
+        ),
     )
 
 

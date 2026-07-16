@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 
 const getHeaders = () => {
   const token = localStorage.getItem('token');
@@ -9,6 +9,26 @@ const getHeaders = () => {
 };
 
 export const api = {
+  analyzeFundus: async (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await fetch(`${API_BASE_URL}/diagnosis/analyze`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Không thể nhận diện ảnh đáy mắt.');
+    }
+    return response.json();
+  },
+
+  getDiagnosisModelInfo: async () => {
+    const response = await fetch(`${API_BASE_URL}/diagnosis/model-info`);
+    if (!response.ok) throw new Error('Không thể đọc thông tin model.');
+    return response.json();
+  },
+
   // Auth endpoints
   login: async (username, password) => {
     const response = await fetch(`${API_BASE_URL}/auth/login`, {

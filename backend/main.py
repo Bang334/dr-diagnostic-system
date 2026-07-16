@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth import router as auth_router
+from app.api.diagnosis import router as diagnosis_router
 from app.api.patients import router as patient_router
 from app.api.reports import router as report_router
 from app.api.reviews import router as review_router
@@ -76,6 +77,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(diagnosis_router, prefix="/api/v1")
 app.include_router(patient_router, prefix="/api/v1")
 app.include_router(screening_router, prefix="/api/v1")
 app.include_router(review_router, prefix="/api/v1")
