@@ -24,6 +24,9 @@ class ResearchNotebookTests(unittest.TestCase):
         )
         self.assertIn("datasets', 'download'", source)
         self.assertIn("userdata.get('KAGGLE_API_TOKEN')", source)
+        self.assertIn("Labeled replay:", source)
+        self.assertIn("Unlabeled pool:", source)
+        self.assertIn("labeled replay + pseudo-label mới", source)
 
     def test_does_not_embed_access_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")

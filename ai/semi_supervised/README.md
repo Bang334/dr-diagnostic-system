@@ -47,6 +47,11 @@ fine-tune bằng:
 - LR head `1e-5`, LR backbone `1e-6`;
 - chọn checkpoint theo QWK validation.
 
+Đây là self-training có **labeled replay**: model student khởi tạo từ best
+checkpoint rồi học trên hợp của `train` cũ và pseudo-label mới. Dataset grading
+cũ không phải nguồn unlabeled; nó được phát lại để giảm confirmation bias và
+catastrophic forgetting.
+
 ```powershell
 python -m ai.semi_supervised.semi_supervised_training `
   --checkpoint D:\checkpoints\checkpoint-best.pth `
