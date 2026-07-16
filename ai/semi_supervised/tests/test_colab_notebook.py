@@ -19,12 +19,16 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("ai.semi_supervised.few_shot_demo", source)
         self.assertIn("--unlabeled-dir", source)
         self.assertIn("test_split_used", source)
+        self.assertIn(
+            "kaggle:sehastrajits/fundus-aptosddridirdeyepacsmessidor", source
+        )
+        self.assertIn("datasets', 'download'", source)
+        self.assertIn("userdata.get('KAGGLE_API_TOKEN')", source)
 
     def test_does_not_embed_access_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)
         self.assertNotIn("hf_", raw)
-        self.assertNotIn("KAGGLE_API_TOKEN", raw)
 
 
 if __name__ == "__main__":

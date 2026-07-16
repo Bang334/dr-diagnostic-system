@@ -92,8 +92,10 @@ Notebook sẽ:
 1. mount Google Drive;
 2. clone/pull đúng branch;
 3. dò các file `checkpoint-best.pth` trên Drive;
-4. cho chọn dataset split có sẵn hoặc nhập đường dẫn dataset;
-5. cho chọn thư mục/ZIP ảnh chưa nhãn khi chạy semi-supervised;
+4. mặc định tự tải dataset fundus gộp từ Kaggle giống notebook grading, hoặc
+   nhận thư mục/ZIP có sẵn;
+5. nhận nguồn ảnh chưa nhãn từ `kaggle:owner/dataset`, thư mục hoặc ZIP khi chạy
+   semi-supervised;
 6. lưu mỗi phương pháp vào output directory riêng trên Drive.
 
 Script từ chối output directory đã có artifact để tránh nối lẫn hai run hoặc
@@ -102,3 +104,8 @@ ghi đè checkpoint cũ. Khi chạy lại, hãy đổi `Tên run` trong notebook
 Checkpoint đầu vào phải là checkpoint CE do `ai/grading/train.py` tạo. Notebook
 không cần đăng nhập Hugging Face vì kiến trúc được dựng với `pretrained=False`
 và toàn bộ trọng số được lấy từ checkpoint Drive.
+
+Để tự tải dữ liệu, thêm `KAGGLE_API_TOKEN` vào Colab Secrets. Dataset có nhãn
+mặc định là `sehastrajits/fundus-aptosddridirdeyepacsmessidor`. Semi-supervised
+vẫn cần một Kaggle dataset khác hoặc một thư mục ảnh ngoài làm nguồn chưa nhãn;
+không được dùng lại dataset có nhãn hay test split.
