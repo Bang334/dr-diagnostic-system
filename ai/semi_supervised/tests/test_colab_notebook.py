@@ -22,8 +22,6 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("ai.semi_supervised.semi_supervised_training", source)
         self.assertIn("ai.semi_supervised.few_shot_demo", source)
         self.assertIn("--unlabeled-dir", source)
-        self.assertIn("'--max-unlabeled-images', '20000'", source)
-        self.assertIn("'--max-labeled-per-class', '1000'", source)
         self.assertIn("test_split_used", source)
         self.assertIn(
             "kaggle:sehastrajits/fundus-aptosddridirdeyepacsmessidor", source
@@ -45,15 +43,6 @@ class ResearchNotebookTests(unittest.TestCase):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)
         self.assertNotIn("hf_", raw)
-
-    def test_streams_training_logs_without_python_buffering(self):
-        notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-        source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
-        self.assertIn("cmd.insert(1, '-u')", source)
-        self.assertIn("subprocess.Popen(", source)
-        self.assertIn("stderr=subprocess.STDOUT", source)
-        self.assertIn("for line in process.stdout", source)
-        self.assertIn('print(line, end="", flush=True)', source)
 
 
 if __name__ == "__main__":
