@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +26,8 @@ from ai.semi_supervised.research_utils import (
 )
 from ai.semi_supervised.semi_supervised_training import (
     generate_pseudo_labels,
+    limit_labeled_replay,
+    limit_unlabeled_paths,
     parse_args as parse_semi_args,
 )
 
@@ -47,6 +51,8 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
         self.assertEqual(args.patience, 3)
+        self.assertEqual(args.max_unlabeled_images, 20_000)
+        self.assertEqual(args.max_labeled_per_class, 1_000)
 
     def test_few_shot_defaults_only_unfreeze_last_block(self):
         args = parse_few_shot_args(
@@ -154,6 +160,35 @@ class DataSeparationTests(unittest.TestCase):
             (output / "history.jsonl").write_text("old run", encoding="utf-8")
             with self.assertRaisesRegex(FileExistsError, "not empty"):
                 prepare_fresh_output_dir(output)
+
+
+class ReplaySamplingTests(unittest.TestCase):
+    def test_limits_labeled_replay_per_class_deterministically(self):
+        frame = pd.DataFrame(
+            {
+                "image_path": [
+                    f"{grade}_{index}.jpg"
+                    for grade in range(5)
+                    for index in range(7)
+                ],
+                "diagnosis": [grade for grade in range(5) for _ in range(7)],
+            }
+        )
+        first = limit_labeled_replay(frame, max_per_class=3, seed=42)
+        second = limit_labeled_replay(frame, max_per_class=3, seed=42)
+        self.assertEqual(len(first), 15)
+        self.assertEqual(
+            first["diagnosis"].value_counts().sort_index().tolist(), [3] * 5
+        )
+        self.assertEqual(first["image_path"].tolist(), second["image_path"].tolist())
+
+    def test_limits_unlabeled_scan_deterministically(self):
+        paths = [Path(f"image_{index:05d}.jpg") for index in range(100)]
+        first = limit_unlabeled_paths(paths, max_images=20, seed=42)
+        second = limit_unlabeled_paths(paths, max_images=20, seed=42)
+        self.assertEqual(len(first), 20)
+        self.assertEqual(first, second)
+        self.assertEqual(len(set(first)), 20)
 
 
 class DeepDRiDPreparationTests(unittest.TestCase):
@@ -293,17 +328,21 @@ class PseudoLabelTests(unittest.TestCase):
     def test_keeps_only_predictions_above_threshold(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
-            frame = generate_pseudo_labels(
-                _ConfidenceModel(),
-                loader,
-                torch.device("cpu"),
-                threshold=0.95,
-                max_per_class=0,
-                amp_enabled=False,
-            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                frame = generate_pseudo_labels(
+                    _ConfidenceModel(),
+                    loader,
+                    torch.device("cpu"),
+                    threshold=0.95,
+                    max_per_class=0,
+                    amp_enabled=False,
+                )
         self.assertEqual(len(frame), 1)
         self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 2)
         self.assertGreater(float(frame.iloc[0]["confidence"]), 0.95)
+        self.assertIn("Pseudo-label progress: image 1/2", output.getvalue())
+        self.assertIn("Pseudo-label progress: image 2/2", output.getvalue())
 
 
 if __name__ == "__main__":
