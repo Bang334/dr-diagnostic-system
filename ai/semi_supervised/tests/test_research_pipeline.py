@@ -39,7 +39,7 @@ from ai.semi_supervised.semi_supervised_training import (
 
 
 class ArgumentDefaultTests(unittest.TestCase):
-    def test_semi_supervised_defaults_are_conservative(self):
+    def test_semi_supervised_defaults_use_all_available_images(self):
         args = parse_semi_args(
             [
                 "--checkpoint",
@@ -57,8 +57,9 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
         self.assertEqual(args.patience, 3)
-        self.assertEqual(args.max_unlabeled_images, 20_000)
-        self.assertEqual(args.max_labeled_per_class, 1_000)
+        self.assertEqual(args.max_unlabeled_images, 0)
+        self.assertEqual(args.max_labeled_per_class, 0)
+        self.assertEqual(args.max_pseudo_per_class, 0)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
 

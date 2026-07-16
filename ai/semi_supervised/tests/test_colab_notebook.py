@@ -22,8 +22,9 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("ai.semi_supervised.semi_supervised_training", source)
         self.assertIn("ai.semi_supervised.few_shot_demo", source)
         self.assertIn("--unlabeled-dir", source)
-        self.assertIn("'--max-unlabeled-images', '20000'", source)
-        self.assertIn("'--max-labeled-per-class', '1000'", source)
+        self.assertNotIn("'--max-unlabeled-images'", source)
+        self.assertNotIn("'--max-labeled-per-class'", source)
+        self.assertNotIn("'--max-pseudo-per-class'", source)
         self.assertIn("checkpoint-last.pth", source)
         self.assertIn("--resume", source)
         self.assertIn("--eval-only", source)
@@ -45,6 +46,26 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("github:deepdrdoc/DeepDRiD@v1.1", source)
         self.assertIn("prepare_deepdrid_target", source)
         self.assertNotIn("--val-episodes", source)
+
+    def test_final_test_is_a_separate_manual_cell_with_best_or_last_choice(self):
+        notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+        code_cells = [
+            "".join(cell.get("source", []))
+            for cell in notebook["cells"]
+            if cell.get("cell_type") == "code"
+        ]
+        training_cell = next(
+            source
+            for source in code_cells
+            if "run_live(cmd)" in source and "last_checkpoint" in source
+        )
+        test_cell = next(
+            source for source in code_cells if "TEST_CHECKPOINT_KIND" in source
+        )
+        self.assertNotIn("--eval-only", training_cell)
+        self.assertIn("--eval-only", test_cell)
+        self.assertIn("checkpoint-best.pth", test_cell)
+        self.assertIn("checkpoint-last.pth", test_cell)
 
     def test_streams_training_and_test_logs_without_python_buffering(self):
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))

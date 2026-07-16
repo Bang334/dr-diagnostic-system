@@ -201,19 +201,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-unlabeled-images",
         type=int,
-        default=20_000,
+        default=0,
         help="Deterministically scan at most N unlabeled images; use 0 for all",
     )
     parser.add_argument(
         "--max-labeled-per-class",
         type=int,
-        default=1_000,
+        default=0,
         help="Replay at most N labeled train images per class; use 0 for all",
     )
     parser.add_argument(
         "--max-pseudo-per-class",
         type=int,
-        default=2000,
+        default=0,
         help="Keep the most confident N images per class; use 0 for no cap",
     )
     parser.add_argument("--num-workers", type=int, default=2)
