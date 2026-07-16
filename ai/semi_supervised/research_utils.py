@@ -406,8 +406,11 @@ def save_classifier_checkpoint(
     epoch: int,
     best_qwk: float,
     parent_checkpoint: Path,
+    best_epoch: Optional[int] = None,
+    stale_epochs: Optional[int] = None,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
+    scaler: Optional[Any] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     state: Dict[str, Any] = {
@@ -421,4 +424,12 @@ def save_classifier_checkpoint(
         state["optimizer"] = optimizer.state_dict()
     if scheduler is not None:
         state["scheduler"] = scheduler.state_dict()
-    torch.save(state, path)
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
+    if best_epoch is not None:
+        state["best_epoch"] = int(best_epoch)
+    if stale_epochs is not None:
+        state["stale_epochs"] = int(stale_epochs)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state, temporary_path)
+    temporary_path.replace(path)

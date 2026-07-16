@@ -1,4 +1,7 @@
 import argparse
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,10 +24,17 @@ from ai.semi_supervised.research_utils import (
     load_split_frames,
     prepare_deepdrid_target,
     prepare_fresh_output_dir,
+    save_classifier_checkpoint,
 )
 from ai.semi_supervised.semi_supervised_training import (
     generate_pseudo_labels,
+    limit_labeled_replay,
+    limit_unlabeled_paths,
     parse_args as parse_semi_args,
+    prepare_output_dir,
+    resume_training_state,
+    trim_history_for_resume,
+    validate_args as validate_semi_args,
 )
 
 
@@ -47,6 +57,27 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
         self.assertEqual(args.patience, 3)
+        self.assertEqual(args.max_unlabeled_images, 20_000)
+        self.assertEqual(args.max_labeled_per_class, 1_000)
+        self.assertIsNone(args.resume)
+        self.assertFalse(args.eval_only)
+
+    def test_eval_only_requires_resume_checkpoint(self):
+        args = parse_semi_args(
+            [
+                "--checkpoint",
+                "best.pth",
+                "--dataset-dir",
+                "dataset",
+                "--unlabeled-dir",
+                "unlabeled",
+                "--output-dir",
+                "output",
+                "--eval-only",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "requires --resume"):
+            validate_semi_args(args)
 
     def test_few_shot_defaults_only_unfreeze_last_block(self):
         args = parse_few_shot_args(
@@ -154,6 +185,128 @@ class DataSeparationTests(unittest.TestCase):
             (output / "history.jsonl").write_text("old run", encoding="utf-8")
             with self.assertRaisesRegex(FileExistsError, "not empty"):
                 prepare_fresh_output_dir(output)
+
+    def test_resume_accepts_nonempty_matching_output_directory(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output = Path(temporary_dir) / "run"
+            output.mkdir()
+            checkpoint = output / "checkpoint-last.pth"
+            checkpoint.write_bytes(b"checkpoint")
+            prepared = prepare_output_dir(output, checkpoint)
+        self.assertEqual(prepared, output.resolve())
+
+
+class ReplaySamplingTests(unittest.TestCase):
+    def test_limits_labeled_replay_per_class_deterministically(self):
+        frame = pd.DataFrame(
+            {
+                "image_path": [
+                    f"{grade}_{index}.jpg"
+                    for grade in range(5)
+                    for index in range(7)
+                ],
+                "diagnosis": [grade for grade in range(5) for _ in range(7)],
+            }
+        )
+        first = limit_labeled_replay(frame, max_per_class=3, seed=42)
+        second = limit_labeled_replay(frame, max_per_class=3, seed=42)
+        self.assertEqual(len(first), 15)
+        self.assertEqual(
+            first["diagnosis"].value_counts().sort_index().tolist(), [3] * 5
+        )
+        self.assertEqual(first["image_path"].tolist(), second["image_path"].tolist())
+
+    def test_limits_unlabeled_scan_deterministically(self):
+        paths = [Path(f"image_{index:05d}.jpg") for index in range(100)]
+        first = limit_unlabeled_paths(paths, max_images=20, seed=42)
+        second = limit_unlabeled_paths(paths, max_images=20, seed=42)
+        self.assertEqual(len(first), 20)
+        self.assertEqual(first, second)
+        self.assertEqual(len(set(first)), 20)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_restores_epoch_patience_best_epoch_and_training_states(self):
+        model = nn.Linear(2, 5)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5)
+
+        class _Scaler:
+            def __init__(self):
+                self.loaded = None
+
+            def state_dict(self):
+                return {"scale": 128.0}
+
+            def load_state_dict(self, state):
+                self.loaded = state
+
+        scaler = _Scaler()
+        state = {
+            "epoch": 2,
+            "best_qwk": 0.91,
+            "best_epoch": 1,
+            "stale_epochs": 1,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": {"scale": 64.0},
+        }
+        start_epoch, best_qwk, best_epoch, stale_epochs = resume_training_state(
+            state, optimizer, scheduler, scaler
+        )
+        self.assertEqual(start_epoch, 3)
+        self.assertEqual(best_qwk, 0.91)
+        self.assertEqual(best_epoch, 1)
+        self.assertEqual(stale_epochs, 1)
+        self.assertEqual(scaler.loaded, {"scale": 64.0})
+
+    def test_trims_duplicate_or_future_history_before_resume(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            history = Path(temporary_dir) / "history.jsonl"
+            history.write_text(
+                "\n".join(
+                    json.dumps({"epoch": epoch}) for epoch in (0, 1, 2, 2, 3)
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            trim_history_for_resume(history, start_epoch=3)
+            epochs = [
+                json.loads(line)["epoch"]
+                for line in history.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(epochs, [0, 1, 2])
+
+    def test_last_checkpoint_contains_complete_resume_state(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            model = nn.Linear(2, 5)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5)
+
+            class _Scaler:
+                def state_dict(self):
+                    return {"scale": 128.0}
+
+            path = Path(temporary_dir) / "checkpoint-last.pth"
+            save_classifier_checkpoint(
+                path,
+                model,
+                {"loss": "ce"},
+                epoch=2,
+                best_qwk=0.91,
+                best_epoch=1,
+                stale_epochs=1,
+                parent_checkpoint=Path(temporary_dir) / "parent.pth",
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=_Scaler(),
+            )
+            state = torch.load(path, map_location="cpu", weights_only=False)
+        self.assertEqual(state["best_epoch"], 1)
+        self.assertEqual(state["stale_epochs"], 1)
+        self.assertEqual(state["scaler"], {"scale": 128.0})
+        self.assertIn("optimizer", state)
+        self.assertIn("scheduler", state)
 
 
 class DeepDRiDPreparationTests(unittest.TestCase):
@@ -293,17 +446,20 @@ class PseudoLabelTests(unittest.TestCase):
     def test_keeps_only_predictions_above_threshold(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
-            frame = generate_pseudo_labels(
-                _ConfidenceModel(),
-                loader,
-                torch.device("cpu"),
-                threshold=0.95,
-                max_per_class=0,
-                amp_enabled=False,
-            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                frame = generate_pseudo_labels(
+                    _ConfidenceModel(),
+                    loader,
+                    torch.device("cpu"),
+                    threshold=0.95,
+                    max_per_class=0,
+                    amp_enabled=False,
+                )
         self.assertEqual(len(frame), 1)
         self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 2)
         self.assertGreater(float(frame.iloc[0]["confidence"]), 0.95)
+        self.assertIn("Pseudo-label progress: image 1/2", output.getvalue())
 
 
 if __name__ == "__main__":
