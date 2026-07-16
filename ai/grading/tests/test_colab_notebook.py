@@ -16,6 +16,45 @@ NOTEBOOK = Path(__file__).resolve().parents[1] / "DR_Training_Colab.ipynb"
 
 
 class ColabNotebookDownloadTests(unittest.TestCase):
+    def test_hugging_face_auth_cell_survives_temporary_gateway_timeout(self):
+        notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+        source = next(
+            "".join(cell.get("source", []))
+            for cell in notebook["cells"]
+            if "from huggingface_hub import login, whoami" in "".join(
+                cell.get("source", [])
+            )
+        )
+        fake_google = types.ModuleType("google")
+        fake_colab = types.ModuleType("google.colab")
+        fake_colab.userdata = types.SimpleNamespace(get=lambda _name: "test-token")
+        fake_google.colab = fake_colab
+        fake_huggingface = types.ModuleType("huggingface_hub")
+        fake_huggingface.login = lambda **_kwargs: None
+
+        def raise_gateway_timeout(**_kwargs):
+            raise RuntimeError("504 Gateway Timeout")
+
+        fake_huggingface.whoami = raise_gateway_timeout
+        output = io.StringIO()
+        with patch.dict(
+            sys.modules,
+            {
+                "google": fake_google,
+                "google.colab": fake_colab,
+                "huggingface_hub": fake_huggingface,
+            },
+        ):
+            with patch.dict(os.environ, {}, clear=False):
+                with contextlib.redirect_stdout(output):
+                    exec(
+                        compile(source, "DR_Training_Colab.ipynb:hf-auth", "exec"),
+                        {},
+                    )
+                self.assertEqual(os.environ["HF_TOKEN"], "test-token")
+        self.assertIn("504 Gateway Timeout", output.getvalue())
+        self.assertIn("tiếp tục", output.getvalue())
+
     def test_downloads_merged_dataset_and_preserves_predefined_splits(self):
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         clone_source = "".join(notebook["cells"][6]["source"])
