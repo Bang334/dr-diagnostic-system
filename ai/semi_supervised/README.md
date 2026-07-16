@@ -119,7 +119,8 @@ Notebook sẽ:
 2. clone/pull đúng branch;
 3. dò các file `checkpoint-best.pth` trên Drive;
 4. với semi, mặc định tự tải dataset fundus gộp từ Kaggle làm labeled replay;
-   với few-shot, bắt buộc nhập dataset target mới có split cố định;
+   với few-shot, mặc định tải DeepDRiD v1.1 chính thức làm target mới, cache ZIP
+   trong `MyDrive/retfound_datasets` và tự chuyển CSV/ảnh sang split cố định;
 5. nhận nguồn ảnh chưa nhãn từ `kaggle:owner/dataset`, thư mục hoặc ZIP khi chạy
    semi-supervised;
 6. lưu mỗi phương pháp vào output directory riêng trên Drive và hiển thị
@@ -136,3 +137,7 @@ và toàn bộ trọng số được lấy từ checkpoint Drive.
 mặc định là `sehastrajits/fundus-aptosddridirdeyepacsmessidor`. Semi-supervised
 vẫn cần một Kaggle dataset khác hoặc một thư mục ảnh ngoài làm nguồn chưa nhãn;
 không được dùng lại dataset có nhãn hay test split.
+
+Checkpoint mặc định của notebook là
+`/content/drive/MyDrive/retfound_merged_seed42/checkpoint-best.pth`. Few-shot mặc
+định dùng `github:deepdrdoc/DeepDRiD@v1.1`; nguồn này không cần Kaggle token.

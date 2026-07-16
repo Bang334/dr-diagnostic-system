@@ -12,6 +12,7 @@ import hashlib
 import os
 import pathlib
 import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -164,6 +165,93 @@ def discover_images(root_dir: Path) -> List[Path]:
     if not images:
         raise ValueError(f"No supported fundus images found under {root_dir}")
     return images
+
+
+def prepare_deepdrid_target(source_root: Path, output_dir: Path) -> Path:
+    """Convert official DeepDRiD v1.1 metadata into fixed class-folder splits."""
+    source_root = source_root.expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    source_id = "github:deepdrdoc/DeepDRiD@v1.1"
+    marker = output_dir / ".prepared_source"
+    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == source_id:
+        return output_dir
+
+    regular_candidates = [
+        path for path in source_root.rglob("regular_fundus_images") if path.is_dir()
+    ]
+    if len(regular_candidates) != 1:
+        raise ValueError(
+            f"Expected exactly one regular_fundus_images directory under {source_root}; "
+            f"found {len(regular_candidates)}"
+        )
+    regular_root = regular_candidates[0]
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    for split_name in ("train", "validation", "test"):
+        for grade in range(NUM_CLASSES):
+            (output_dir / split_name / str(grade)).mkdir(parents=True, exist_ok=True)
+
+    def link_rows(
+        frame: pd.DataFrame,
+        image_root: Path,
+        split_name: str,
+        label_column: str,
+    ) -> None:
+        invalid = sorted(set(frame[label_column].astype(int)) - set(range(NUM_CLASSES)))
+        if invalid:
+            raise ValueError(f"DeepDRiD labels outside 0..4: {invalid}")
+        for row in frame.itertuples(index=False):
+            image_id = str(row.image_id)
+            patient_id = image_id.split("_", 1)[0]
+            source = image_root / patient_id / f"{image_id}.jpg"
+            if not source.is_file():
+                raise FileNotFoundError(f"Missing DeepDRiD image: {source}")
+            grade = int(getattr(row, label_column))
+            destination = output_dir / split_name / str(grade) / source.name
+            try:
+                os.link(source, destination)
+            except OSError:
+                destination.symlink_to(source)
+
+    official_splits = {
+        "train": ("regular-fundus-training", "regular-fundus-training.csv"),
+        "validation": (
+            "regular-fundus-validation",
+            "regular-fundus-validation.csv",
+        ),
+    }
+    for split_name, (folder_name, csv_name) in official_splits.items():
+        folder = regular_root / folder_name
+        frame = pd.read_csv(folder / csv_name)
+        required = {"image_id", "left_eye_DR_Level", "right_eye_DR_Level"}
+        missing = required.difference(frame.columns)
+        if missing:
+            raise ValueError(f"DeepDRiD {csv_name} is missing columns: {sorted(missing)}")
+        frame["diagnosis"] = (
+            frame["left_eye_DR_Level"]
+            .combine_first(frame["right_eye_DR_Level"])
+            .astype(int)
+        )
+        link_rows(frame, folder / "Images", split_name, "diagnosis")
+
+    evaluation = regular_root / "Online-Challenge1&2-Evaluation"
+    test_frame = pd.read_excel(evaluation / "Challenge1_labels.xlsx")
+    required_test = {"image_id", "DR_Levels"}
+    missing_test = required_test.difference(test_frame.columns)
+    if missing_test:
+        raise ValueError(
+            f"DeepDRiD Challenge1 labels are missing columns: {sorted(missing_test)}"
+        )
+    test_frame = test_frame.rename(columns={"DR_Levels": "diagnosis"})
+    link_rows(test_frame, evaluation / "Images", "test", "diagnosis")
+
+    marker.write_text(source_id, encoding="utf-8")
+    counts = {
+        split: sum(1 for path in (output_dir / split).rglob("*.jpg"))
+        for split in ("train", "validation", "test")
+    }
+    print(f"Prepared DeepDRiD patient splits: {counts}")
+    return output_dir
 
 
 def assert_unlabeled_is_external(

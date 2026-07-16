@@ -14,6 +14,10 @@ class ResearchNotebookTests(unittest.TestCase):
         source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         self.assertIn("drive.mount('/content/drive')", source)
         self.assertIn("checkpoint-best.pth", source)
+        self.assertIn(
+            "/content/drive/MyDrive/retfound_merged_seed42/checkpoint-best.pth",
+            source,
+        )
         self.assertIn("load_grading_checkpoint", source)
         self.assertIn("ai.semi_supervised.semi_supervised_training", source)
         self.assertIn("ai.semi_supervised.few_shot_demo", source)
@@ -31,6 +35,8 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("--target-dataset-dir", source)
         self.assertIn("support_manifest.csv", source)
         self.assertIn("target_test_used_for_model_selection", source)
+        self.assertIn("github:deepdrdoc/DeepDRiD@v1.1", source)
+        self.assertIn("prepare_deepdrid_target", source)
         self.assertNotIn("--val-episodes", source)
 
     def test_does_not_embed_access_tokens(self):

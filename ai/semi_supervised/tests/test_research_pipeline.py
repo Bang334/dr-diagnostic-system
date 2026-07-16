@@ -18,6 +18,8 @@ from ai.semi_supervised.few_shot_demo import (
 from ai.semi_supervised.research_utils import (
     assert_unlabeled_is_external,
     load_grading_checkpoint,
+    load_split_frames,
+    prepare_deepdrid_target,
     prepare_fresh_output_dir,
 )
 from ai.semi_supervised.semi_supervised_training import (
@@ -152,6 +154,59 @@ class DataSeparationTests(unittest.TestCase):
             (output / "history.jsonl").write_text("old run", encoding="utf-8")
             with self.assertRaisesRegex(FileExistsError, "not empty"):
                 prepare_fresh_output_dir(output)
+
+
+class DeepDRiDPreparationTests(unittest.TestCase):
+    def test_converts_official_metadata_to_fixed_class_splits(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            regular = root / "archive" / "regular_fundus_images"
+
+            for folder_name, csv_name, patient_offset in (
+                ("regular-fundus-training", "regular-fundus-training.csv", 100),
+                ("regular-fundus-validation", "regular-fundus-validation.csv", 200),
+            ):
+                folder = regular / folder_name
+                rows = []
+                for grade in range(5):
+                    patient_id = patient_offset + grade
+                    image_id = f"{patient_id}_l1"
+                    image = folder / "Images" / str(patient_id) / f"{image_id}.jpg"
+                    image.parent.mkdir(parents=True, exist_ok=True)
+                    image.write_bytes(f"image-{folder_name}-{grade}".encode())
+                    rows.append(
+                        {
+                            "image_id": image_id,
+                            "left_eye_DR_Level": grade,
+                            "right_eye_DR_Level": None,
+                        }
+                    )
+                folder.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame(rows).to_csv(folder / csv_name, index=False)
+
+            evaluation = regular / "Online-Challenge1&2-Evaluation"
+            test_rows = []
+            for grade in range(5):
+                patient_id = 300 + grade
+                image_id = f"{patient_id}_r1"
+                image = evaluation / "Images" / str(patient_id) / f"{image_id}.jpg"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(f"test-image-{grade}".encode())
+                test_rows.append({"image_id": image_id, "DR_Levels": grade})
+            pd.DataFrame(test_rows).to_excel(
+                evaluation / "Challenge1_labels.xlsx", index=False
+            )
+
+            output = prepare_deepdrid_target(root, root / "prepared")
+            frames, _ = load_split_frames(output)
+
+        self.assertEqual({name: len(frame) for name, frame in frames.items()}, {
+            "train": 5,
+            "val": 5,
+            "test": 5,
+        })
+        for frame in frames.values():
+            self.assertEqual(sorted(frame["diagnosis"].tolist()), list(range(5)))
 
 
 class FixedSupportTests(unittest.TestCase):
