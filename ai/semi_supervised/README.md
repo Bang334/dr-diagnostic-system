@@ -41,7 +41,7 @@ pip install -r ai/semi_supervised/requirements-research.txt
 ## Pseudo-labeling
 
 Pipeline nạp checkpoint CE tốt nhất, đánh pseudo-label một lần bằng transform
-validation, giữ ảnh có confidence từ `0.95`, giới hạn số ảnh mỗi lớp, rồi
+validation, giữ ảnh theo confidence threshold, giới hạn số ảnh mỗi lớp, rồi
 fine-tune bằng:
 
 - ảnh có nhãn với trọng số `1.0`;
@@ -59,8 +59,18 @@ python -m ai.semi_supervised.semi_supervised_training `
   --checkpoint D:\checkpoints\checkpoint-best.pth `
   --dataset-dir D:\data\fundus_merged `
   --unlabeled-dir D:\data\fundus_unlabeled `
-  --output-dir D:\runs\retfound_pseudo_v1
+  --output-dir D:\runs\retfound_pseudo_v1 `
+  --threshold 0.98,0.75,0.75,0.85,0.85 `
+  --max-labeled-per-class 2000 `
+  --max-pseudo-per-class 2000
 ```
+
+`--threshold` nhận một giá trị dùng chung hoặc năm giá trị theo đúng thứ tự
+Grade `0,1,2,3,4`. File `pseudo_labels.csv` ghi thêm `applied_threshold` để audit.
+Mỗi grade lấy tối đa 2.000 ảnh có nhãn thật để labeled replay. Sau khi lọc
+threshold, mỗi grade cũng chỉ giữ tối đa 2.000 ảnh pseudo-label có confidence
+cao nhất. Ảnh thật có trọng số `1.0`; ảnh pseudo-label có trọng số
+`0.25 × confidence`.
 
 Các artifact chính:
 

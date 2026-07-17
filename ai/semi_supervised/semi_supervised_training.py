@@ -172,6 +172,41 @@ def trim_history_for_resume(history_path: Path, start_epoch: int) -> None:
     history_path.write_text(content, encoding="utf-8")
 
 
+def parse_thresholds(value: Any) -> List[float]:
+    """Return thresholds ordered by predicted DR grade 0, 1, 2, 3, 4."""
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",")]
+        if any(not part for part in parts):
+            raise ValueError("--threshold contains an empty value")
+        try:
+            values = [float(part) for part in parts]
+        except ValueError as exc:
+            raise ValueError("--threshold values must be numbers") from exc
+    elif isinstance(value, (int, float)):
+        values = [float(value)]
+    else:
+        try:
+            values = [float(item) for item in value]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("--threshold must be a number or a list") from exc
+
+    if len(values) == 1:
+        values *= 5
+    elif len(values) != 5:
+        raise ValueError(
+            "--threshold requires one value or exactly 5 comma-separated values "
+            "ordered by grade 0,1,2,3,4"
+        )
+
+    for grade, threshold in enumerate(values):
+        if not 0.5 <= threshold <= 1.0:
+            raise ValueError(
+                f"--threshold for grade {grade} must be between 0.5 and 1.0; "
+                f"received {threshold}"
+            )
+    return values
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, type=Path)
@@ -196,7 +231,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--backbone-lr", type=float, default=1e-6)
     parser.add_argument("--min-lr", type=float, default=1e-7)
     parser.add_argument("--weight-decay", type=float, default=0.05)
-    parser.add_argument("--threshold", type=float, default=0.95)
+    parser.add_argument(
+        "--threshold",
+        type=parse_thresholds,
+        default=parse_thresholds("0.95"),
+        metavar="T0,T1,T2,T3,T4",
+        help=(
+            "One confidence threshold for every grade, or five comma-separated "
+            "thresholds ordered as grade 0,1,2,3,4"
+        ),
+    )
     parser.add_argument("--pseudo-weight", type=float, default=0.25)
     parser.add_argument(
         "--max-unlabeled-images",
@@ -235,8 +279,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if not 0.5 <= args.threshold <= 1.0:
-        raise ValueError("--threshold must be between 0.5 and 1.0")
+    # Idempotent so tests and programmatic callers can provide a scalar, string or list.
+    args.threshold = parse_thresholds(args.threshold)
     if not 0.0 < args.pseudo_weight <= 1.0:
         raise ValueError("--pseudo-weight must be in (0, 1]")
     if args.epochs < 1 or args.patience < 1:
@@ -280,10 +324,11 @@ def generate_pseudo_labels(
     loader: DataLoader,
     device: torch.device,
     *,
-    threshold: float,
+    threshold: Any,
     max_per_class: int,
     amp_enabled: bool,
 ) -> pd.DataFrame:
+    thresholds = parse_thresholds(threshold)
     model.eval()
     records: List[Dict[str, Any]] = []
     total_images = len(loader.dataset)
@@ -305,12 +350,15 @@ def generate_pseudo_labels(
                 probabilities = torch.softmax(model(images), dim=1)
             confidence, labels = probabilities.max(dim=1)
             for path, label, score in zip(paths, labels.cpu(), confidence.cpu()):
-                if float(score) >= threshold:
+                lbl = int(label)
+                class_threshold = thresholds[lbl]
+                if float(score) >= class_threshold:
                     records.append(
                         {
                             "image_path": os.fspath(Path(path).resolve()),
-                            "pseudo_label": int(label),
+                            "pseudo_label": lbl,
                             "confidence": float(score),
+                            "applied_threshold": class_threshold,
                         }
                     )
                 processed_images += 1
@@ -329,7 +377,8 @@ def generate_pseudo_labels(
         progress.close()
 
     frame = pd.DataFrame.from_records(
-        records, columns=["image_path", "pseudo_label", "confidence"]
+        records,
+        columns=["image_path", "pseudo_label", "confidence", "applied_threshold"],
     )
     if frame.empty:
         return frame
@@ -529,6 +578,37 @@ def run(args: argparse.Namespace) -> None:
         saved_run_args = resume_state.get("args", {}).get(
             "semi_supervised_args", {}
         )
+        saved_threshold_value = saved_run_args.get("threshold")
+        if saved_threshold_value is not None:
+            saved_thresholds = parse_thresholds(saved_threshold_value)
+            if saved_thresholds != args.threshold:
+                raise ValueError(
+                    "Cannot change --threshold while resuming because pseudo_labels.csv "
+                    f"was created with {saved_thresholds}; received {args.threshold}. "
+                    "Start a new output directory to regenerate pseudo-labels."
+                )
+        saved_max_pseudo_per_class = int(
+            saved_run_args.get("max_pseudo_per_class", 0)
+        )
+        if saved_max_pseudo_per_class != args.max_pseudo_per_class:
+            raise ValueError(
+                "Cannot change --max-pseudo-per-class while resuming because "
+                "pseudo_labels.csv was created with "
+                f"{saved_max_pseudo_per_class}; received "
+                f"{args.max_pseudo_per_class}. Start a new output directory to "
+                "regenerate pseudo-labels."
+            )
+        saved_max_labeled_per_class = int(
+            saved_run_args.get("max_labeled_per_class", 0)
+        )
+        if saved_max_labeled_per_class != args.max_labeled_per_class:
+            raise ValueError(
+                "Cannot change --max-labeled-per-class while resuming because "
+                "labeled_replay_manifest.csv was created with "
+                f"{saved_max_labeled_per_class}; received "
+                f"{args.max_labeled_per_class}. Start a new output directory to "
+                "regenerate the labeled replay manifest."
+            )
         if replay_manifest_path.is_file():
             replay_frame = pd.read_csv(replay_manifest_path)
         else:
