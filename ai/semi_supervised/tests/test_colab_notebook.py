@@ -95,6 +95,13 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("for line in process.stdout", source)
         self.assertIn('print(line, end="", flush=True)', source)
 
+    def test_bootstrap_verifies_per_grade_threshold_parser(self):
+        notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+        source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+        self.assertIn("parse_thresholds('0.98,0.75,0.75,0.85,0.85')", source)
+        self.assertIn("'rev-parse', '--short', 'HEAD'", source)
+        self.assertIn("GITHUB_BRANCH = 'develop'", source)
+
     def test_does_not_embed_access_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)
