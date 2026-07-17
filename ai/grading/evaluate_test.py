@@ -101,10 +101,12 @@ def load_test_split(args: argparse.Namespace, fake_args: argparse.Namespace):
 def load_checkpoint(checkpoint_path: Path, device: torch.device):
     print(f"Loading checkpoint: {checkpoint_path}")
     
-    # Khắc phục lỗi PosixPath trên hệ điều hành Windows
+    # Checkpoints produced on Linux can contain pathlib.PosixPath objects.
+    # Translate those objects only on Windows; WindowsPath is invalid on Colab/Linux.
     import pathlib
     temp = pathlib.PosixPath
-    pathlib.PosixPath = pathlib.WindowsPath
+    if os.name == "nt":
+        pathlib.PosixPath = pathlib.WindowsPath
     try:
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     finally:
