@@ -131,8 +131,9 @@ Notebook sẽ:
 4. với semi, mặc định tự tải dataset fundus gộp từ Kaggle làm labeled replay;
    với few-shot, mặc định tải DeepDRiD v1.1 chính thức làm target mới, cache ZIP
    trong `MyDrive/retfound_datasets` và tự chuyển CSV/ảnh sang split cố định;
-5. nhận nguồn ảnh chưa nhãn từ `kaggle:owner/dataset`, thư mục hoặc ZIP khi chạy
-   semi-supervised;
+5. với semi, mặc định tải BRSET patient-wise split từ
+   `kaggle:tanzinabdul/fundus-patientwise-split`, ẩn nhãn ICDR và chỉ dùng split
+   `train` để tạo pseudo-label; `validation/test` luôn được giữ ngoài training;
 6. lưu mỗi phương pháp vào output directory riêng trên Drive và hiển thị
    `support_manifest.csv`/`comparison.json` sau run few-shot.
 
@@ -144,9 +145,10 @@ không cần đăng nhập Hugging Face vì kiến trúc được dựng với `
 và toàn bộ trọng số được lấy từ checkpoint Drive.
 
 Để tự tải dữ liệu, thêm `KAGGLE_API_TOKEN` vào Colab Secrets. Dataset có nhãn
-mặc định là `sehastrajits/fundus-aptosddridirdeyepacsmessidor`. Semi-supervised
-vẫn cần một Kaggle dataset khác hoặc một thư mục ảnh ngoài làm nguồn chưa nhãn;
-không được dùng lại dataset có nhãn hay test split.
+mặc định là `sehastrajits/fundus-aptosddridirdeyepacsmessidor`. Nguồn semi mặc
+định là BRSET mirror `tanzinabdul/fundus-patientwise-split`; notebook không đọc
+nhãn ICDR và tự giới hạn `--unlabeled-dir` vào split `train`. Các split
+`validation/test` của BRSET không được quét hoặc pseudo-label.
 
 Checkpoint mặc định của notebook là
 `/content/drive/MyDrive/retfound_merged_seed42/checkpoint-best.pth`. Few-shot mặc

@@ -37,8 +37,14 @@ class ResearchNotebookTests(unittest.TestCase):
             "kaggle:sehastrajits/fundus-aptosddridirdeyepacsmessidor", source
         )
         self.assertIn(
+            "kaggle:tanzinabdul/fundus-patientwise-split", source
+        )
+        self.assertNotIn(
             "kaggle:griffchristenson/unlabeled-retinal-image-dataset", source
         )
+        self.assertIn("UNLABELED_DIR = unlabeled_splits['train'].resolve()", source)
+        self.assertIn("if name != 'train'", source)
+        self.assertIn("Giữ ngoài semi", source)
         self.assertIn("value='retfound_semi'", source)
         self.assertNotIn("datetime.now()", source)
         self.assertIn("'epochs': 10, 'patience': 6", source)
@@ -100,7 +106,7 @@ class ResearchNotebookTests(unittest.TestCase):
         source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         self.assertIn("parse_thresholds('0.93,0.75,0.90,0.80,0.80')", source)
         self.assertIn("'rev-parse', '--short', 'HEAD'", source)
-        self.assertIn("GITHUB_BRANCH = 'develop'", source)
+        self.assertIn("GITHUB_BRANCH = 'feat/brset-semi-patient-split'", source)
 
     def test_does_not_embed_access_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
