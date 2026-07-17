@@ -65,8 +65,8 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertFalse(args.eval_only)
 
     def test_accepts_one_threshold_per_dr_grade(self):
-        thresholds = parse_thresholds("0.98,0.75,0.75,0.85,0.85")
-        self.assertEqual(thresholds, [0.98, 0.75, 0.75, 0.85, 0.85])
+        thresholds = parse_thresholds("0.93,0.75,0.90,0.80,0.80")
+        self.assertEqual(thresholds, [0.93, 0.75, 0.90, 0.80, 0.80])
 
         args = parse_semi_args(
             [
@@ -74,7 +74,7 @@ class ArgumentDefaultTests(unittest.TestCase):
                 "--dataset-dir", "dataset",
                 "--unlabeled-dir", "unlabeled",
                 "--output-dir", "output",
-                "--threshold", "0.98,0.75,0.75,0.85,0.85",
+                "--threshold", "0.93,0.75,0.90,0.80,0.80",
             ]
         )
         self.assertEqual(args.threshold, thresholds)
@@ -483,7 +483,7 @@ class _PerClassConfidenceModel(nn.Module):
     def forward(self, images):
         logits = torch.zeros(images.size(0), 5, device=images.device)
         grade_two = images[:, 0, 0, 0] > 0.5
-        logits[grade_two, 2] = 3.0
+        logits[grade_two, 2] = 4.0
         logits[~grade_two, 0] = 3.0
         return logits
 
@@ -508,7 +508,7 @@ class PseudoLabelTests(unittest.TestCase):
         self.assertIn("Pseudo-label progress: image 1/2", output.getvalue())
 
     def test_applies_threshold_for_the_predicted_grade(self):
-        thresholds = [0.98, 0.75, 0.75, 0.85, 0.85]
+        thresholds = [0.93, 0.75, 0.90, 0.80, 0.80]
         with tempfile.TemporaryDirectory() as temporary_dir:
             loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
             with contextlib.redirect_stdout(io.StringIO()):
@@ -522,7 +522,7 @@ class PseudoLabelTests(unittest.TestCase):
                 )
 
         self.assertEqual(frame["pseudo_label"].tolist(), [2])
-        self.assertEqual(frame["applied_threshold"].tolist(), [0.75])
+        self.assertEqual(frame["applied_threshold"].tolist(), [0.90])
 
     def test_limits_each_predicted_grade_independently(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

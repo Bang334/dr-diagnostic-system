@@ -42,7 +42,7 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("value='retfound_semi'", source)
         self.assertNotIn("datetime.now()", source)
         self.assertIn("'epochs': 10, 'patience': 6", source)
-        self.assertIn("0.98,0.75,0.75,0.85,0.85", source)
+        self.assertIn("0.93,0.75,0.90,0.80,0.80", source)
         self.assertIn("Thứ tự threshold: Grade 0, 1, 2, 3, 4", source)
         self.assertIn("datasets', 'download'", source)
         self.assertIn("userdata.get('KAGGLE_API_TOKEN')", source)
@@ -98,7 +98,7 @@ class ResearchNotebookTests(unittest.TestCase):
     def test_bootstrap_verifies_per_grade_threshold_parser(self):
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
-        self.assertIn("parse_thresholds('0.98,0.75,0.75,0.85,0.85')", source)
+        self.assertIn("parse_thresholds('0.93,0.75,0.90,0.80,0.80')", source)
         self.assertIn("'rev-parse', '--short', 'HEAD'", source)
         self.assertIn("GITHUB_BRANCH = 'develop'", source)
 

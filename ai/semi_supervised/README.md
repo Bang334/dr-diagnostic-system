@@ -60,7 +60,7 @@ python -m ai.semi_supervised.semi_supervised_training `
   --dataset-dir D:\data\fundus_merged `
   --unlabeled-dir D:\data\fundus_unlabeled `
   --output-dir D:\runs\retfound_pseudo_v1 `
-  --threshold 0.98,0.75,0.75,0.85,0.85 `
+  --threshold 0.93,0.75,0.90,0.80,0.80 `
   --max-labeled-per-class 2000 `
   --max-pseudo-per-class 2000
 ```
