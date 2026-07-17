@@ -41,7 +41,7 @@ pip install -r ai/semi_supervised/requirements-research.txt
 ## Pseudo-labeling
 
 Pipeline nạp checkpoint CE tốt nhất, đánh pseudo-label một lần bằng transform
-validation, giữ ảnh theo confidence threshold, giới hạn số ảnh mỗi lớp, rồi
+validation, giữ ảnh có confidence từ `0.95`, giới hạn số ảnh mỗi lớp, rồi
 fine-tune bằng:
 
 - ảnh có nhãn với trọng số `1.0`;
@@ -59,18 +59,8 @@ python -m ai.semi_supervised.semi_supervised_training `
   --checkpoint D:\checkpoints\checkpoint-best.pth `
   --dataset-dir D:\data\fundus_merged `
   --unlabeled-dir D:\data\fundus_unlabeled `
-  --output-dir D:\runs\retfound_pseudo_v1 `
-  --threshold 0.93,0.75,0.90,0.80,0.80 `
-  --max-labeled-per-class 2000 `
-  --max-pseudo-per-class 2000
+  --output-dir D:\runs\retfound_pseudo_v1
 ```
-
-`--threshold` nhận một giá trị dùng chung hoặc năm giá trị theo đúng thứ tự
-Grade `0,1,2,3,4`. File `pseudo_labels.csv` ghi thêm `applied_threshold` để audit.
-Mỗi grade lấy tối đa 2.000 ảnh có nhãn thật để labeled replay. Sau khi lọc
-threshold, mỗi grade cũng chỉ giữ tối đa 2.000 ảnh pseudo-label có confidence
-cao nhất. Ảnh thật có trọng số `1.0`; ảnh pseudo-label có trọng số
-`0.25 × confidence`.
 
 Các artifact chính:
 
@@ -131,9 +121,8 @@ Notebook sẽ:
 4. với semi, mặc định tự tải dataset fundus gộp từ Kaggle làm labeled replay;
    với few-shot, mặc định tải DeepDRiD v1.1 chính thức làm target mới, cache ZIP
    trong `MyDrive/retfound_datasets` và tự chuyển CSV/ảnh sang split cố định;
-5. với semi, mặc định tải BRSET patient-wise split từ
-   `kaggle:tanzinabdul/fundus-patientwise-split`, ẩn nhãn ICDR và chỉ dùng split
-   `train` để tạo pseudo-label; `validation/test` luôn được giữ ngoài training;
+5. nhận nguồn ảnh chưa nhãn từ `kaggle:owner/dataset`, thư mục hoặc ZIP khi chạy
+   semi-supervised;
 6. lưu mỗi phương pháp vào output directory riêng trên Drive và hiển thị
    `support_manifest.csv`/`comparison.json` sau run few-shot.
 
@@ -145,10 +134,9 @@ không cần đăng nhập Hugging Face vì kiến trúc được dựng với `
 và toàn bộ trọng số được lấy từ checkpoint Drive.
 
 Để tự tải dữ liệu, thêm `KAGGLE_API_TOKEN` vào Colab Secrets. Dataset có nhãn
-mặc định là `sehastrajits/fundus-aptosddridirdeyepacsmessidor`. Nguồn semi mặc
-định là BRSET mirror `tanzinabdul/fundus-patientwise-split`; notebook không đọc
-nhãn ICDR và tự giới hạn `--unlabeled-dir` vào split `train`. Các split
-`validation/test` của BRSET không được quét hoặc pseudo-label.
+mặc định là `sehastrajits/fundus-aptosddridirdeyepacsmessidor`. Semi-supervised
+vẫn cần một Kaggle dataset khác hoặc một thư mục ảnh ngoài làm nguồn chưa nhãn;
+không được dùng lại dataset có nhãn hay test split.
 
 Checkpoint mặc định của notebook là
 `/content/drive/MyDrive/retfound_merged_seed42/checkpoint-best.pth`. Few-shot mặc

@@ -23,10 +23,8 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("ai.semi_supervised.few_shot_demo", source)
         self.assertIn("--unlabeled-dir", source)
         self.assertNotIn("'--max-unlabeled-images'", source)
-        self.assertIn("'--max-labeled-per-class'", source)
-        self.assertIn("'max_labeled_per_class': 2000", source)
-        self.assertIn("'--max-pseudo-per-class'", source)
-        self.assertIn("'max_pseudo_per_class': 2000", source)
+        self.assertNotIn("'--max-labeled-per-class'", source)
+        self.assertNotIn("'--max-pseudo-per-class'", source)
         self.assertIn("checkpoint-last.pth", source)
         self.assertIn("--resume", source)
         self.assertIn("--eval-only", source)
@@ -37,19 +35,10 @@ class ResearchNotebookTests(unittest.TestCase):
             "kaggle:sehastrajits/fundus-aptosddridirdeyepacsmessidor", source
         )
         self.assertIn(
-            "kaggle:tanzinabdul/fundus-patientwise-split", source
-        )
-        self.assertNotIn(
             "kaggle:griffchristenson/unlabeled-retinal-image-dataset", source
         )
-        self.assertIn("UNLABELED_DIR = unlabeled_splits['train'].resolve()", source)
-        self.assertIn("if name != 'train'", source)
-        self.assertIn("Giữ ngoài semi", source)
         self.assertIn("value='retfound_semi'", source)
         self.assertNotIn("datetime.now()", source)
-        self.assertIn("'epochs': 10, 'patience': 6", source)
-        self.assertIn("0.93,0.75,0.90,0.80,0.80", source)
-        self.assertIn("Thứ tự threshold: Grade 0, 1, 2, 3, 4", source)
         self.assertIn("datasets', 'download'", source)
         self.assertIn("userdata.get('KAGGLE_API_TOKEN')", source)
         self.assertIn("Labeled replay:", source)
@@ -100,13 +89,6 @@ class ResearchNotebookTests(unittest.TestCase):
         self.assertIn("stderr=subprocess.STDOUT", source)
         self.assertIn("for line in process.stdout", source)
         self.assertIn('print(line, end="", flush=True)', source)
-
-    def test_bootstrap_verifies_per_grade_threshold_parser(self):
-        notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-        source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
-        self.assertIn("parse_thresholds('0.93,0.75,0.90,0.80,0.80')", source)
-        self.assertIn("'rev-parse', '--short', 'HEAD'", source)
-        self.assertIn("GITHUB_BRANCH = 'feat/brset-semi-patient-split'", source)
 
     def test_does_not_embed_access_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
