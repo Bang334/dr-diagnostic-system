@@ -5,6 +5,7 @@ import {
   Eye, Stethoscope
 } from 'lucide-react';
 import { api } from '../services/api';
+import SecureImage from './SecureImage';
 
 const DR_LABELS = {
   0: 'No DR',
@@ -42,6 +43,8 @@ export default function PatientDetailsModal({ isOpen, onClose, patient, onStartS
   const [recalls, setRecalls] = useState([]);
   const [isLoadingScreenings, setIsLoadingScreenings] = useState(false);
   const [isLoadingRecalls, setIsLoadingRecalls] = useState(false);
+  const [expandedScreeningId, setExpandedScreeningId] = useState(null);
+  const [showHistoryMasks, setShowHistoryMasks] = useState({});
 
   const qrCodeUrl = patient
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(patient.patient_code)}`
@@ -52,6 +55,8 @@ export default function PatientDetailsModal({ isOpen, onClose, patient, onStartS
       setActiveTab('profile');
       setScreenings([]);
       setRecalls([]);
+      setExpandedScreeningId(null);
+      setShowHistoryMasks({});
     }
   }, [isOpen, patient]);
 
@@ -264,37 +269,194 @@ export default function PatientDetailsModal({ isOpen, onClose, patient, onStartS
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Tổng <strong>{screenings.length}</strong> lần khám</p>
-                {screenings.map((s, idx) => (
-                  <div key={s.id} className="card" style={{
-                    padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    borderLeft: '3px solid var(--primary)', gap: '12px'
-                  }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        <span style={{ fontWeight: 'bold', fontSize: '14px' }}>
-                          Lần khám #{screenings.length - idx}
-                        </span>
-                        <span style={{
-                          padding: '2px 10px', borderRadius: '999px', fontSize: '11px', fontWeight: '600',
-                          backgroundColor: s.status === 'Reviewed' ? 'rgba(16,185,129,0.1)' : s.status === 'AI_Analyzed' ? 'rgba(59,130,246,0.1)' : 'rgba(245,158,11,0.1)',
-                          color: s.status === 'Reviewed' ? '#10B981' : s.status === 'AI_Analyzed' ? '#3B82F6' : '#F59E0B'
-                        }}>
-                          {s.status === 'Reviewed' ? 'Đã duyệt' : s.status === 'AI_Analyzed' ? 'AI đã phân tích' : 'Đang chờ'}
-                        </span>
+                {screenings.map((s, idx) => {
+                  const isExpanded = expandedScreeningId === s.id;
+                  const assessment = s.clinical_assessment;
+                  
+                  const handleDownloadPDF = async (e, screeningId) => {
+                    e.stopPropagation(); // Ngăn hành động toggle expand
+                    try {
+                      const token = localStorage.getItem('token');
+                      const response = await fetch(`/api/v1/screenings/${screeningId}/report.pdf`, {
+                        headers: token ? { 'Authorization': token } : {}
+                      });
+                      if (!response.ok) throw new Error('Không thể tải xuống PDF');
+                      const blob = await response.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `bao-cao-sang-loc-${patient.patient_code}-${screeningId}.pdf`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      console.error(err);
+                      alert('Có lỗi xảy ra khi tải báo cáo PDF.');
+                    }
+                  };
+
+                  return (
+                    <div key={s.id} className="card" style={{
+                      padding: '16px 20px', display: 'flex', flexDirection: 'column',
+                      borderLeft: isExpanded ? '4px solid var(--primary)' : '3px solid var(--border-light)', 
+                      gap: '12px', cursor: 'pointer', transition: 'all 0.2s',
+                      backgroundColor: isExpanded ? 'rgba(13, 148, 136, 0.02)' : 'var(--surface)'
+                    }} onClick={() => setExpandedScreeningId(isExpanded ? null : s.id)}>
+                      
+                      {/* Dòng Header Lần Khám */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            <span style={{ fontWeight: 'bold', fontSize: '14px' }}>
+                              Lần khám #{screenings.length - idx}
+                            </span>
+                            <span style={{
+                              padding: '2px 10px', borderRadius: '999px', fontSize: '11px', fontWeight: '600',
+                              backgroundColor: s.status === 'Reviewed' ? 'rgba(16,185,129,0.1)' : s.status === 'AI_Analyzed' ? 'rgba(59,130,246,0.1)' : 'rgba(245,158,11,0.1)',
+                              color: s.status === 'Reviewed' ? '#10B981' : s.status === 'AI_Analyzed' ? '#3B82F6' : '#F59E0B'
+                            }}>
+                              {s.status === 'Reviewed' ? 'Đã duyệt' : s.status === 'AI_Analyzed' ? 'AI đã phân tích' : 'Đang chờ'}
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <Calendar size={12} />
+                            {new Date(s.screening_date).toLocaleString('vi-VN', { dateStyle: 'medium', timeStyle: 'short' })}
+                          </span>
+                          {s.doctor_name && (
+                            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                              <Eye size={11} /> Bác sĩ phụ trách: {s.doctor_name}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <button 
+                            className="btn btn-secondary" 
+                            style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                            onClick={(e) => handleDownloadPDF(e, s.id)}
+                          >
+                            <Printer size={13} /> Tải PDF
+                          </button>
+                          <ChevronRight size={18} color="var(--text-muted)" style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
+                        </div>
                       </div>
-                      <span style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Calendar size={12} />
-                        {new Date(s.screening_date).toLocaleString('vi-VN', { dateStyle: 'medium', timeStyle: 'short' })}
-                      </span>
-                      {s.doctor_name && (
-                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                          <Eye size={11} /> Bác sĩ: {s.doctor_name}
-                        </span>
+
+                      {/* Vùng chi tiết mở rộng */}
+                      {isExpanded && assessment && (
+                        <div className="animated-fade-in" style={{ 
+                          marginTop: '8px', paddingTop: '16px', borderTop: '1px dashed var(--border-light)',
+                          display: 'flex', flexDirection: 'column', gap: '16px', cursor: 'default'
+                        }} onClick={(e) => e.stopPropagation()}>
+                          
+                          {/* Khuyến nghị tổng quan */}
+                          <div style={{ backgroundColor: 'var(--background)', padding: '12px 16px', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <strong>Kết luận lâm sàng chung:</strong>
+                              <span className="badge" style={{ 
+                                backgroundColor: (RISK_COLORS[assessment.overall_priority] || RISK_COLORS.Low).bg, 
+                                color: (RISK_COLORS[assessment.overall_priority] || RISK_COLORS.Low).color,
+                                fontWeight: 'bold' 
+                              }}>
+                                Nguy cơ: {(RISK_COLORS[assessment.overall_priority] || RISK_COLORS.Low).label}
+                              </span>
+                            </div>
+                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
+                              {assessment.clinical_recommendation}
+                            </p>
+                          </div>
+
+                          {/* Chi tiết từng mắt */}
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                            {[['left_eye', 'Mắt Trái'], ['right_eye', 'Mắt Phải']].map(([eyeKey, eyeLabel]) => {
+                              const eyeData = assessment[eyeKey];
+                              if (!eyeData) return null;
+                              
+                              const eyeGrade = eyeData.grading?.dr_grade ?? 0;
+                              const gradeInfo = DR_COLORS[eyeGrade] || DR_COLORS[0];
+                              const isMaskOn = !!showHistoryMasks[`${s.id}_${eyeKey}`];
+
+                              return (
+                                <div key={eyeKey} style={{ 
+                                  padding: '14px', 
+                                  backgroundColor: 'rgba(0,0,0,0.02)', 
+                                  borderRadius: '8px',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: '8px',
+                                  border: '1px solid var(--border-light)'
+                                }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <strong style={{ fontSize: '14px' }}>{eyeLabel}</strong>
+                                    <span className="badge" style={{ backgroundColor: gradeInfo.bg, color: gradeInfo.color, fontWeight: 'bold' }}>
+                                      {DR_LABELS[eyeGrade]}
+                                    </span>
+                                  </div>
+                                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                                    Độ tin cậy AI: <strong>{Math.round((eyeData.grading?.confidence ?? 0) * 100)}%</strong>
+                                  </div>
+                                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                                    Hoàng điểm: {eyeData.macular_status}
+                                  </div>
+
+                                  {/* Toggle xem ảnh / mask */}
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
+                                    <button 
+                                      className="btn btn-secondary" 
+                                      style={{ padding: '4px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px', alignSelf: 'flex-start', border: '1px solid var(--border-light)' }}
+                                      onClick={() => setShowHistoryMasks(prev => ({ ...prev, [`${s.id}_${eyeKey}`]: !prev[`${s.id}_${eyeKey}`] }))}
+                                    >
+                                      <Eye size={11} /> {isMaskOn ? 'Xem ảnh võng mạc gốc' : 'Xem bản đồ tổn thương AI'}
+                                    </button>
+
+                                    <div style={{ position: 'relative', width: '100%', height: '160px', borderRadius: '6px', overflow: 'hidden', border: '1px solid var(--border-light)', backgroundColor: '#000' }}>
+                                      <SecureImage 
+                                        src={isMaskOn && eyeData.segmentation?.lesion_mask_url ? eyeData.segmentation.lesion_mask_url : (eyeKey === 'left_eye' ? s.left_eye_image_url : s.right_eye_image_url)} 
+                                        alt={`${eyeLabel} image`}
+                                        style={{ width: '100%', height: '100%' }}
+                                      />
+                                    </div>
+                                  </div>
+
+                                  {/* Bảng diện tích tổn thương */}
+                                  {eyeData.segmentation?.lesions && eyeData.segmentation.lesions.length > 0 && (
+                                    <div style={{ marginTop: '8px', fontSize: '11px', backgroundColor: '#fff', padding: '8px', borderRadius: '6px', border: '1px solid var(--border-light)' }}>
+                                      <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                        <thead>
+                                          <tr style={{ borderBottom: '1px solid rgba(0,0,0,0.1)', color: 'var(--text-muted)' }}>
+                                            <th style={{ paddingBottom: '4px', fontWeight: '600' }}>Tổn thương</th>
+                                            <th style={{ paddingBottom: '4px', fontWeight: '600', textAlign: 'center' }}>Trạng thái</th>
+                                            <th style={{ paddingBottom: '4px', fontWeight: '600', textAlign: 'right' }}>Diện tích (%)</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {eyeData.segmentation.lesions.map(lesion => (
+                                            <tr key={lesion.key} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
+                                              <td style={{ padding: '4px 0', fontWeight: '500' }}>{lesion.label}</td>
+                                              <td style={{ padding: '4px 0', textAlign: 'center' }}>
+                                                {lesion.detected ? (
+                                                  <span style={{ color: '#EF4444', fontWeight: 'bold' }}>Phát hiện</span>
+                                                ) : (
+                                                  <span style={{ color: '#10B981' }}>Không</span>
+                                                )}
+                                              </td>
+                                              <td style={{ padding: '4px 0', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
+                                                {lesion.detected ? `${(lesion.area_pct * 100).toFixed(4)}%` : '0.0000%'}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
                       )}
                     </div>
-                    <ChevronRight size={18} color="var(--text-muted)" />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

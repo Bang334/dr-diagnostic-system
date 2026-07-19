@@ -26,6 +26,7 @@ import { api } from './services/api';
 import QRScannerModal from './components/QRScannerModal';
 import PatientFormModal from './components/PatientFormModal';
 import PatientDetailsModal from './components/PatientDetailsModal';
+import SecureImage from './components/SecureImage';
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
@@ -58,6 +59,7 @@ function App() {
   });
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
+  const [showMasks, setShowMasks] = useState({ left_eye: false, right_eye: false });
 
   // Load user info on mount if token exists
   useEffect(() => {
@@ -550,14 +552,65 @@ function App() {
                     {[['left_eye', 'Mắt trái'], ['right_eye', 'Mắt phải']].map(([key, label]) => {
                       const eye = analysisResult[key];
                       const grade = eye.ai_result.dr_grade;
-                      return <div key={key} style={{ padding: '12px', backgroundColor: colors.drGrades[grade].bg, borderRadius: '8px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      return <div key={key} style={{ padding: '16px', backgroundColor: colors.drGrades[grade].bg, borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <strong>{label}: Grade {grade} – {colors.drGrades[grade].label}</strong>
                           <span className="badge" style={{ backgroundColor: colors.drGrades[grade].color, color: '#fff' }}>{Math.round(eye.ai_result.confidence * 100)}%</span>
                         </div>
-                        <div style={{ fontSize: '12px', marginTop: '6px' }}>Ưu tiên rà soát: {eye.review_priority} · Hẹn: {eye.follow_up_window}</div>
-                        <div style={{ fontSize: '12px', marginTop: '4px' }}>Hoàng điểm: {eye.macular_status}</div>
-                        <div style={{ fontSize: '12px', marginTop: '4px' }}>{eye.referral}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Ưu tiên rà soát: <strong>{eye.review_priority}</strong> · Hẹn: <strong>{eye.follow_up_window}</strong></div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Hoàng điểm: <strong>{eye.macular_status}</strong></div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{eye.referral}</div>
+
+                        {/* Image Preview & AI Overlay Toggle */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
+                          <button 
+                            className="btn btn-secondary" 
+                            style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px', alignSelf: 'flex-start', border: '1px solid var(--border-light)' }}
+                            onClick={() => setShowMasks(prev => ({ ...prev, [key]: !prev[key] }))}
+                          >
+                            <Eye size={12} /> {showMasks[key] ? 'Xem ảnh võng mạc gốc' : 'Xem bản đồ tổn thương AI'}
+                          </button>
+                          
+                          <div style={{ position: 'relative', width: '100%', height: '220px', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-light)', backgroundColor: '#000' }}>
+                            <SecureImage 
+                              src={showMasks[key] && eye.segmentation?.lesion_mask_url ? eye.segmentation.lesion_mask_url : eye.image_url} 
+                              alt={`${label} image`}
+                              style={{ width: '100%', height: '100%' }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Lesion Statistics Table */}
+                        {eye.segmentation?.lesions && eye.segmentation.lesions.length > 0 && (
+                          <div style={{ marginTop: '6px', fontSize: '12px', backgroundColor: 'rgba(255,255,255,0.6)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(0,0,0,0.05)' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                              <thead>
+                                <tr style={{ borderBottom: '1px solid rgba(0,0,0,0.1)', color: 'var(--text-muted)' }}>
+                                  <th style={{ paddingBottom: '6px', fontWeight: '600' }}>Tổn thương</th>
+                                  <th style={{ paddingBottom: '6px', fontWeight: '600', textAlign: 'center' }}>Trạng thái</th>
+                                  <th style={{ paddingBottom: '6px', fontWeight: '600', textAlign: 'right' }}>Diện tích (%)</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {eye.segmentation.lesions.map(lesion => (
+                                  <tr key={lesion.key} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
+                                    <td style={{ padding: '6px 0', fontWeight: '500' }}>{lesion.label}</td>
+                                    <td style={{ padding: '6px 0', textAlign: 'center' }}>
+                                      {lesion.detected ? (
+                                        <span className="badge" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#EF4444', fontSize: '11px', padding: '2px 8px' }}>Phát hiện</span>
+                                      ) : (
+                                        <span className="badge" style={{ backgroundColor: 'rgba(16, 185, 129, 0.1)', color: '#10B981', fontSize: '11px', padding: '2px 8px' }}>Không</span>
+                                      )}
+                                    </td>
+                                    <td style={{ padding: '6px 0', textAlign: 'right', fontWeight: 'bold', fontFamily: 'monospace' }}>
+                                      {lesion.detected ? `${(lesion.area_pct * 100).toFixed(4)}%` : '0.0000%'}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </div>;
                     })}
                     <div style={{ fontSize: '12px', padding: '10px', background: 'var(--background)', borderRadius: '6px' }}>

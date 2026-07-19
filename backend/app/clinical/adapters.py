@@ -51,6 +51,47 @@ class UnavailableSegmentationAdapter:
         )
 
 
+class LocalSegmentationAdapter:
+    """
+    Chạy 3 mô hình Attention U-Net (MA/HE/EX) trực tiếp trong process Backend.
+    Tương đương với LocalGradingAdapter nhưng dành cho phân đoạn tổn thương.
+    """
+
+    async def predict(self, image_bytes: bytes, eye: str) -> SegmentationResult:
+        from app.services.lesion_inference import (
+            LesionInferenceError,
+            get_lesion_inference_service,
+        )
+
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(
+                None,
+                get_lesion_inference_service().predict,
+                image_bytes,
+            )
+        except LesionInferenceError as exc:
+            raise AIServiceUnavailable(
+                f"Local segmentation model failed: {exc}"
+            ) from exc
+
+        return SegmentationResult(
+            lesions=[
+                Lesion(
+                    key=item["key"],
+                    label=item["label"],
+                    detected=bool(item["detected"]),
+                    area_pct=float(item["area_pct"]),
+                    confidence=item.get("confidence"),
+                )
+                for item in data.get("lesions", [])
+            ],
+            lesion_mask_url=data.get("lesion_mask_url"),
+            model_version=str(data.get("model_version", "unknown")),
+            status=str(data.get("status", "ok")),
+        )
+
+
 class HttpGradingAdapter:
     def __init__(self, base_url: str, timeout_seconds: float = 120.0):
         self.base_url = base_url.rstrip("/")

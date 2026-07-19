@@ -129,14 +129,14 @@ CREATE TABLE IF NOT EXISTS recalls (
 );
 
 -- 8. TẠO CÁC CHỈ MỤC TỐI ƯU TRUY VẤN (Indexes)
-CREATE INDEX idx_patients_code ON patients(patient_code);
-CREATE INDEX idx_screenings_patient ON screenings(patient_id);
-CREATE INDEX idx_screenings_status ON screenings(status);
-CREATE INDEX idx_ai_results_screening ON ai_results(screening_id);
-CREATE INDEX idx_segmentation_screening ON lesion_segmentation_results(screening_id);
-CREATE INDEX idx_doctor_reviews_screening ON doctor_reviews(screening_id);
-CREATE INDEX idx_recalls_patient ON recalls(patient_id);
-CREATE INDEX idx_recalls_date ON recalls(recall_date);
+CREATE INDEX IF NOT EXISTS idx_patients_code ON patients(patient_code);
+CREATE INDEX IF NOT EXISTS idx_screenings_patient ON screenings(patient_id);
+CREATE INDEX IF NOT EXISTS idx_screenings_status ON screenings(status);
+CREATE INDEX IF NOT EXISTS idx_ai_results_screening ON ai_results(screening_id);
+CREATE INDEX IF NOT EXISTS idx_segmentation_screening ON lesion_segmentation_results(screening_id);
+CREATE INDEX IF NOT EXISTS idx_doctor_reviews_screening ON doctor_reviews(screening_id);
+CREATE INDEX IF NOT EXISTS idx_recalls_patient ON recalls(patient_id);
+CREATE INDEX IF NOT EXISTS idx_recalls_date ON recalls(recall_date);
 
 -- 9. CHÈN DỮ LIỆU MẪU BAN ĐẦU (Seed Data)
 -- Chèn tài khoản Admin/Bác sĩ mặc định (Mật khẩu hash cho: "admin123" và "doctor123")
@@ -144,7 +144,8 @@ INSERT INTO users (username, password_hash, full_name, email, role, hospital_dep
 VALUES 
 ('admin', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'Quản Trị Viên Hệ Thống', 'admin@hospital.gov.vn', 'admin', 'Công Nghệ Thông Tin'),
 ('dr.nguyen', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'TS. BS. Nguyễn Văn An', 'an.nv@hospital.gov.vn', 'doctor', 'Khoa Nhãn Khoa'),
-('dr.tran', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'ThS. BS. Trần Thị Bình', 'binh.tt@hospital.gov.vn', 'doctor', 'Khoa Nội Tiết');
+('dr.tran', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'ThS. BS. Trần Thị Bình', 'binh.tt@hospital.gov.vn', 'doctor', 'Khoa Nội Tiết')
+ON CONFLICT (username) DO NOTHING;
 
 -- Chèn dữ liệu bệnh nhân mẫu
 INSERT INTO patients (patient_code, full_name, gender, date_of_birth, phone_number, address, diabetes_type, diabetes_duration_years, latest_hba1c)
@@ -152,4 +153,6 @@ VALUES
 ('BN0001', 'Phạm Văn Đồng', 'Nam', '1965-04-12', '0912345678', '12 Láng Hạ, Ba Đình, Hà Nội', 'Type 2', 8.5, 7.20),
 ('BN0002', 'Lê Thị Mai', 'Nữ', '1978-09-25', '0987654321', '45 Nguyễn Trãi, Thanh Xuân, Hà Nội', 'Type 2', 4.0, 6.50),
 ('BN0003', 'Nguyễn Tiến Dũng', 'Nam', '1952-11-02', '0904445556', '88 Lê Lợi, Hải Châu, Đà Nẵng', 'Type 1', 15.0, 8.40),
-('BN0004', 'Hoàng Ngọc Ánh', 'Nữ', '1989-01-30', '0933221100', '123 Cách Mạng Tháng 8, Quận 3, TP. HCM', 'Thai kỳ', 0.5, 5.80);
+('BN0004', 'Hoàng Ngọc Ánh', 'Nữ', '1989-01-30', '0933221100', '123 Cách Mạng Tháng 8, Quận 3, TP. HCM', 'Thai kỳ', 0.5, 5.80)
+ON CONFLICT (patient_code) DO NOTHING;
+

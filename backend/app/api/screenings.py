@@ -15,6 +15,7 @@ from app.clinical.adapters import (
     HttpGradingAdapter,
     HttpSegmentationAdapter,
     LocalGradingAdapter,
+    LocalSegmentationAdapter,
     UnavailableSegmentationAdapter,
 )
 from app.clinical.analysis import ClinicalAnalysisModule, InvalidFundusSet
@@ -45,9 +46,11 @@ def build_clinical_module() -> ClinicalAnalysisModule:
             else HttpGradingAdapter(grading_url, timeout)
         ),
         segmentation=(
-            UnavailableSegmentationAdapter()
+            LocalSegmentationAdapter()                          # Chạy 3 model Attention U-Net local
+            if segmentation_url.lower() == "local"
+            else UnavailableSegmentationAdapter()               # Fallback an toàn
             if segmentation_url.lower() in {"", "disabled", "none"}
-            else HttpSegmentationAdapter(segmentation_url, timeout)
+            else HttpSegmentationAdapter(segmentation_url, timeout)  # Microservice bên ngoài
         ),
     )
 

@@ -50,4 +50,19 @@ class Settings:
         os.getenv("DR_MAX_UPLOAD_BYTES", 20 * 1024 * 1024)
     )
 
+    # ── Lesion Segmentation Model Checkpoints (Attention U-Net MA/HE/EX) ──
+    LESION_MA_CHECKPOINT: str = os.getenv(
+        "LESION_MA_CHECKPOINT",
+        str(BASE_DIR / "checkpoints" / "idrid_MA" / "best-checkpoint-epoch=17-val_dice=0.0305.ckpt")
+    )
+    LESION_HE_CHECKPOINT: str = os.getenv(
+        "LESION_HE_CHECKPOINT",
+        str(BASE_DIR / "checkpoints" / "idrid_HE" / "best-checkpoint-epoch=70-val_dice=0.0272.ckpt")
+    )
+    LESION_EX_CHECKPOINT: str = os.getenv(
+        "LESION_EX_CHECKPOINT",
+        str(BASE_DIR / "checkpoints" / "idrid_EX" / "best-checkpoint-epoch=64-val_dice=0.0414.ckpt")
+    )
+    LESION_DEVICE: str = os.getenv("LESION_DEVICE", "auto")
+
 settings = Settings()

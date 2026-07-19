@@ -17,3 +17,8 @@ opencv-python-headless>=4.8.0
 torch>=2.2.0
 torchvision>=0.17.0
 timm>=1.0.0
+
+# ── Lesion Segmentation (Attention U-Net MA/HE/EX) ──
+segmentation-models-pytorch>=0.3.3
+pytorch-lightning>=2.0.0
+scipy>=1.11.0
