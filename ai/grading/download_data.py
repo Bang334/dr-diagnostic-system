@@ -1,102 +1,94 @@
+"""Download and extract the merged five-source fundus dataset from Kaggle."""
+
+from __future__ import annotations
+
+import argparse
 import os
 import subprocess
-import argparse
-import zipfile
 import sys
+import zipfile
+from pathlib import Path
 
-# Đảm bảo in ra console không bị lỗi Unicode trên Windows
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
 
-def create_directory_structure(base_dir):
-    """Tạo cấu trúc thư mục chuẩn cho dữ liệu DR Grading."""
-    print(f"[*] Đang tạo cấu trúc thư mục tại: {base_dir}")
-    dirs_to_create = [
-        "raw/aptos2019",
-        "raw/eyepacs",
-        "processed/aptos2019/train_images",
-        "processed/aptos2019/test_images",
-        "processed/eyepacs/train_images",
-        "processed/eyepacs/test_images",
-        "splits" # Lưu trữ các file csv đã split train/val/test
+DATASET_REF = "sehastrajits/fundus-aptosddridirdeyepacsmessidor"
+ARCHIVE_NAME = "fundus-aptosddridirdeyepacsmessidor.zip"
+
+
+def has_kaggle_auth() -> bool:
+    return bool(os.environ.get("KAGGLE_API_TOKEN")) or (
+        Path.home() / ".kaggle" / "kaggle.json"
+    ).is_file()
+
+
+def extract_archive(archive_path: Path, output_dir: Path) -> None:
+    """Extract a trusted Kaggle archive while rejecting path traversal."""
+    output_root = output_dir.resolve()
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            destination = (output_dir / member.filename).resolve()
+            if destination != output_root and output_root not in destination.parents:
+                raise ValueError(f"Unsafe archive member: {member.filename}")
+        archive.extractall(output_dir)
+
+
+def download_dataset(output_dir: Path, *, force: bool, keep_archive: bool) -> Path:
+    split_dir = output_dir / "split_dataset"
+    if split_dir.is_dir() and not force:
+        print(f"Dataset is already extracted at {split_dir}")
+        return split_dir
+    if not has_kaggle_auth():
+        raise RuntimeError(
+            "Kaggle credentials are missing. Set KAGGLE_API_TOKEN or place "
+            "kaggle.json under ~/.kaggle/."
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "kaggle",
+        "datasets",
+        "download",
+        "-d",
+        DATASET_REF,
+        "-p",
+        os.fspath(output_dir),
     ]
-    
-    for d in dirs_to_create:
-        path = os.path.join(base_dir, d)
-        os.makedirs(path, exist_ok=True)
-        print(f"  + {path}")
-    print("[v] Đã hoàn tất tạo cấu trúc thư mục.\n")
+    if force:
+        command.append("--force")
+    print(f"Downloading {DATASET_REF} (about 10.9 GB)...")
+    subprocess.run(command, check=True)
 
-def check_kaggle_auth():
-    """Kiểm tra cấu hình Kaggle API."""
-    home_dir = os.path.expanduser('~')
-    kaggle_dir = os.path.join(home_dir, '.kaggle')
-    kaggle_json = os.path.join(kaggle_dir, 'kaggle.json')
-    
-    if not os.path.exists(kaggle_json):
-        print("[!] CẢNH BÁO: Không tìm thấy file ~/.kaggle/kaggle.json")
-        print("Để sử dụng tính năng tải tự động, vui lòng thực hiện:")
-        print("  1. Đăng nhập vào kaggle.com -> Settings -> Create New Token")
-        print("  2. Đặt file kaggle.json tải về vào thư mục: " + kaggle_dir)
-        print("  3. Chạy lại script này với cờ --aptos hoặc --eyepacs.\n")
-        return False
-    return True
+    archive_path = output_dir / ARCHIVE_NAME
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"Kaggle did not create the expected archive: {archive_path}")
+    print(f"Extracting {archive_path}...")
+    extract_archive(archive_path, output_dir)
+    if not split_dir.is_dir():
+        raise RuntimeError(f"Archive is missing the expected directory: {split_dir}")
+    if not keep_archive:
+        archive_path.unlink()
+    print(f"Dataset ready: {split_dir}")
+    return split_dir
 
-def download_dataset(competition_name, raw_dir, display_name):
-    """Tải và giải nén dữ liệu từ Kaggle."""
-    print(f"[*] Đang tải {display_name} từ Kaggle...")
-    try:
-        # Cần cài đặt kaggle package: pip install kaggle
-        subprocess.run([
-            "kaggle", "competitions", "download", 
-            "-c", competition_name, 
-            "-p", raw_dir
-        ], check=True)
-        
-        # Tìm file zip để giải nén
-        zip_path = os.path.join(raw_dir, f"{competition_name}.zip")
-        if os.path.exists(zip_path):
-            print(f"[*] Đang giải nén {display_name}...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(raw_dir)
-            os.remove(zip_path) # Xóa file zip để tiết kiệm dung lượng
-            
-        print(f"[v] Hoàn tất chuẩn bị {display_name}!\n")
-    except subprocess.CalledProcessError:
-        print(f"[x] Lỗi: Kaggle từ chối truy cập. Bạn đã vào trang {competition_name} và bấm 'I Understand and Accept' rules chưa?\n")
-    except FileNotFoundError:
-        print("[x] Lỗi: Không tìm thấy lệnh 'kaggle'. Vui lòng chạy: pip install kaggle\n")
-    except Exception as e:
-        print(f"[x] Lỗi không xác định khi tải {display_name}: {e}\n")
+
+def parse_args() -> argparse.Namespace:
+    project_root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=project_root / "data" / "raw" / "merged_fundus",
+    )
+    parser.add_argument("--force", action="store_true", help="Download again if present")
+    parser.add_argument("--keep-archive", action="store_true")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Script tải và cấu trúc dữ liệu cho bài toán DR Grading")
-    parser.add_argument("--aptos", action="store_true", help="Tự động tải dữ liệu APTOS 2019 (~8.2GB)")
-    parser.add_argument("--eyepacs", action="store_true", help="Tự động tải dữ liệu EyePACS (~82GB)")
-    args = parser.parse_args()
-
-    # Xác định thư mục data (đặt ở root dự án)
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(current_dir))
-    data_dir = os.path.join(project_root, "data")
-    
-    print("=== SETUP DỮ LIỆU DR GRADING (THÀNH VIÊN 1) ===\n")
-    
-    # 1. Luôn tạo cấu trúc thư mục
-    create_directory_structure(data_dir)
-    
-    # 2. Xử lý tải dữ liệu
-    if args.aptos or args.eyepacs:
-        if check_kaggle_auth():
-            if args.aptos:
-                download_dataset("aptos2019-blindness-detection", os.path.join(data_dir, "raw", "aptos2019"), "APTOS 2019")
-            if args.eyepacs:
-                print("[!] LƯU Ý: Dữ liệu EyePACS rất lớn (~82GB). Quá trình tải có thể mất nhiều giờ.")
-                download_dataset("diabetic-retinopathy-detection", os.path.join(data_dir, "raw", "eyepacs"), "EyePACS")
-    else:
-        print("[*] LƯU Ý: Không có tham số tải tự động (--aptos hoặc --eyepacs).")
-        print("Để tải dữ liệu tự động, hãy chạy:")
-        print("  python download_data.py --aptos")
-        print("  python download_data.py --eyepacs")
-        print("Hoặc bạn có thể tự tải và giải nén thủ công vào các thư mục 'raw' tương ứng.")
+    options = parse_args()
+    download_dataset(
+        options.output_dir.expanduser().resolve(),
+        force=options.force,
+        keep_archive=options.keep_archive,
+    )

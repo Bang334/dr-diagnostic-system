@@ -74,8 +74,9 @@ dr-diagnostic-system/
 | **Thành viên 2** | **Phân đoạn tổn thương (Lesion Segmentation)** | - **Nghiên cứu:** Các loại tổn thương (Microaneurysm, Hemorrhage, Hard Exudate); Các kiến trúc (U-Net, U-Net++, Attention U-Net); Chỉ số đánh giá (Dice Score, IoU).<br>- **Thực hành:** Thu thập dữ liệu (IDRiD, DDR); Tiền xử lý ảnh phục vụ segmentation; Huấn luyện mô hình phân đoạn; Sinh bản đồ tổn thương (mask) dạng overlay. | - Tham gia thiết kế và xây dựng giao diện hiển thị ảnh võng mạc (Frontend) vẽ đè bản đồ tổn thương.<br>- Tích hợp API Segmentation vào luồng xử lý chung của Backend. |
 | **Thành viên 3** | **AI Nâng Cao & Hỗ Trợ Lâm Sàng** | - **Nghiên cứu:** Kỹ thuật Semi-supervised Learning, Few-shot Learning; Tiêu chuẩn ứng dụng AI nhãn khoa tại Việt Nam; Quy trình hỗ trợ chẩn đoán lâm sàng.<br>- **Thực hành:** Thử nghiệm Semi-supervised/Few-shot; Xây dựng module tổng hợp kết quả (phân loại + phân đoạn); Sinh báo cáo tự động (mức độ DR, vùng tổn thương, khuyến nghị điều trị dựa trên hướng dẫn lâm sàng). | - Tham gia thiết kế hệ thống, kiến trúc CSDL PostgreSQL.<br>- Xây dựng Module xuất phiếu kết quả PDF, phân hệ thống kê dịch tễ (Dashboard) và quản trị hệ thống. |
 
-> Trạng thái hiện tại: module lâm sàng, adapter AI, bộ ảnh bốn trường, PDF và
-> human review đã được tích hợp. Semi-supervised/Few-shot vẫn là nghiên cứu chưa
+> Trạng thái hiện tại: module lâm sàng, adapter AI, một ảnh fundus cho mỗi mắt
+> và human review đã được tích hợp. Bộ hai trường ảnh/mắt và PDF hoàn chỉnh vẫn
+> là hạng mục cần hoàn thiện. Semi-supervised/Few-shot vẫn là nghiên cứu chưa
 > nghiệm thu trên dữ liệu thật; xem `docs/tv3_integration_status.md`. Mọi kết quả
 > lâm sàng là dự thảo, không tự chẩn đoán DME hoặc chỉ định điều trị.
 
@@ -140,7 +141,7 @@ Giao diện Web sẽ chạy tại: http://localhost:5173
 
 Hệ thống phân loại ảnh chụp võng mạc thành 5 mức độ bệnh lý theo thang điểm chuẩn lâm sàng quốc tế ICDR (International Clinical Diabetic Retinopathy):
 
-1. **No DR (Cấp 0):** Võng mạc bình thường, không xuất hiện tổn thương.
+1. **No apparent DR (Cấp 0):** Không thấy dấu hiệu DR trên ảnh đang đánh giá; không đồng nghĩa không mắc đái tháo đường hoặc loại trừ mọi bệnh võng mạc.
 2. **Mild NPDR (Cấp 1):** Chỉ có các vi phình mạch (Microaneurysms).
 3. **Moderate NPDR (Cấp 2):** Có vi phình mạch, xuất huyết (Hemorrhages), rỉ dịch (Exudates) nhưng chưa đến mức Severe.
 4. **Severe NPDR (Cấp 3):** Xuất huyết nặng (>20 điểm ở cả 4 cung phần tư), tĩnh mạch dạng chuỗi (Beading) ở >= 2 cung phần tư, hoặc IRMA ở >= 1 cung phần tư.

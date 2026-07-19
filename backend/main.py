@@ -7,12 +7,13 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth import router as auth_router
 from app.api.patients import router as patient_router
+from app.api.patient_portal import router as patient_portal_router
 from app.api.reports import router as report_router
 from app.api.reviews import router as review_router
 from app.api.screenings import router as screening_router
 from app.core.config import BASE_DIR, settings
-from app.core.security import get_current_user
-from app.models.clinical import User
+from app.core.security import require_staff
+from app.models.account import Account
 
 
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +46,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/uploads/{filename}", include_in_schema=False)
-def protected_upload(filename: str, current_user: User = Depends(get_current_user)):
+def protected_upload(filename: str, current_account: Account = Depends(require_staff)):
     target = (UPLOAD_DIR / filename).resolve()
     if target.parent != UPLOAD_DIR or not target.is_file():
         return JSONResponse(status_code=404, content={"detail": "Image not found."})
@@ -77,6 +78,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(patient_router, prefix="/api/v1")
+app.include_router(patient_portal_router, prefix="/api/v1")
 app.include_router(screening_router, prefix="/api/v1")
 app.include_router(review_router, prefix="/api/v1")
 app.include_router(report_router, prefix="/api/v1")

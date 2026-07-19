@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 
 const getHeaders = () => {
   const token = localStorage.getItem('token');
@@ -32,6 +32,18 @@ export const api = {
     });
     if (!response.ok) {
       throw new Error('Failed to get current user');
+    }
+    return response.json();
+  },
+
+  getPatientPortalOverview: async () => {
+    const response = await fetch(`${API_BASE_URL}/patient-portal/overview`, {
+      method: 'GET',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Không thể tải hồ sơ bệnh nhân.');
     }
     return response.json();
   },
@@ -85,6 +97,31 @@ export const api = {
     return response.json();
   },
 
+  getScreeningDetail: async (screeningId) => {
+    const response = await fetch(`${API_BASE_URL}/screenings/${screeningId}`, {
+      method: 'GET',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Không thể tải chi tiết lần khám.');
+    }
+    return response.json();
+  },
+
+  reviewScreening: async (screeningId, reviewData) => {
+    const response = await fetch(`${API_BASE_URL}/reviews/${screeningId}`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(reviewData),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Không thể lưu kết luận bác sĩ.');
+    }
+    return response.json();
+  },
+
   // Recall / follow-up appointments for a patient
   getPatientRecalls: async (patientId) => {
     const response = await fetch(`${API_BASE_URL}/patients/${patientId}/recalls`, {
@@ -95,13 +132,10 @@ export const api = {
     return response.json();
   },
 
-  uploadScreening: async (patientId, files, clinicalContext = {}) => {
+  uploadScreening: async (patientId, files) => {
     const form = new FormData();
     form.append('patient_id', patientId);
     Object.entries(files).forEach(([key, file]) => form.append(key, file));
-    Object.entries(clinicalContext).forEach(([key, value]) => {
-      if (value !== '' && value !== null && value !== undefined) form.append(key, value);
-    });
     const token = localStorage.getItem('token');
     const response = await fetch(`${API_BASE_URL}/screenings/upload`, {
       method: 'POST',
@@ -112,6 +146,18 @@ export const api = {
       const error = await response.json().catch(() => ({}));
       const detail = typeof error.detail === 'string' ? error.detail : error.detail?.message;
       throw new Error(detail || 'Không thể phân tích bộ ảnh sàng lọc.');
+    }
+    return response.json();
+  },
+  createQuickRecall: async (patientId, recallData) => {
+    const response = await fetch(`${API_BASE_URL}/patients/${patientId}/recalls`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(recallData),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Không thể tạo lịch tái khám.');
     }
     return response.json();
   },

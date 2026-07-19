@@ -34,6 +34,8 @@ class PatientResponse(PatientBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    portal_username: Optional[str] = None
+    has_portal_account: bool = False
 
     class Config:
         from_attributes = True

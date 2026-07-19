@@ -65,28 +65,51 @@ class ClinicalAnalysisTests(unittest.TestCase):
         image = valid_fundus_bytes()
         return asyncio.run(
             module.analyze(
-                EyeImageSet("L", image, image),
-                EyeImageSet("R", image, image),
+                EyeImageSet("L", image),
+                EyeImageSet("R", image),
                 context or ClinicalContext(),
             )
         )
 
-    def test_requires_two_technically_valid_images_per_eye(self):
+    def test_requires_one_technically_valid_image_per_eye(self):
         module = ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter())
         image = valid_fundus_bytes()
         with self.assertRaises(InvalidFundusSet):
             asyncio.run(
                 module.analyze(
-                    EyeImageSet("L", b"not-an-image", image),
-                    EyeImageSet("R", image, image),
+                    EyeImageSet("L", b"not-an-image"),
+                    EyeImageSet("R", image),
+                    ClinicalContext(),
+                )
+            )
+
+    def test_can_analyze_only_one_eye(self):
+        image = valid_fundus_bytes()
+        result = asyncio.run(
+            ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter()).analyze(
+                EyeImageSet("L", image),
+                None,
+                ClinicalContext(),
+            )
+        )
+        self.assertIsNotNone(result.left_eye)
+        self.assertIsNone(result.right_eye)
+        self.assertEqual(result.left_eye.eye, "L")
+
+    def test_rejects_screening_without_any_eye(self):
+        with self.assertRaises(InvalidFundusSet):
+            asyncio.run(
+                ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter()).analyze(
+                    None,
+                    None,
                     ClinicalContext(),
                 )
             )
 
     def test_quality_is_never_automatically_marked_good(self):
         result = self.analyze(ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter()))
-        self.assertEqual(result.left_eye.quality["disc"].status, "ReviewRequired")
-        self.assertTrue(result.left_eye.quality["disc"].requires_human_review)
+        self.assertEqual(result.left_eye.quality["fundus"].status, "ReviewRequired")
+        self.assertTrue(result.left_eye.quality["fundus"].requires_human_review)
 
     def test_hard_exudate_area_does_not_diagnose_dme(self):
         result = self.analyze(
@@ -106,31 +129,11 @@ class ClinicalAnalysisTests(unittest.TestCase):
         self.assertNotIn("24", result.left_eye.referral)
         self.assertIn("specialist_confirmation_required", result.left_eye.safety_flags)
 
-    def test_visual_acuity_below_five_tenths_requires_referral(self):
-        result = self.analyze(
-            ClinicalAnalysisModule(
-                FakeGradingAdapter(grades={"L": 0, "R": 0}),
-                FakeSegmentationAdapter(),
-            ),
-            ClinicalContext(visual_acuity_left=0.4),
-        )
-        self.assertEqual(result.left_eye.review_priority, "urgent")
-        self.assertIn("5/10", result.left_eye.referral)
-
-    def test_sudden_vision_loss_bypasses_ai_timeline(self):
-        result = self.analyze(
-            ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter()),
-            ClinicalContext(sudden_vision_loss=True),
-        )
-        self.assertEqual(result.overall_priority, "emergency")
-        self.assertIn("trong ngày", result.left_eye.follow_up_window)
-
     def test_low_confidence_is_review_flag_not_diagnosis(self):
         result = self.analyze(
             ClinicalAnalysisModule(FakeGradingAdapter(confidence=0.4), FakeSegmentationAdapter())
         )
         self.assertIn("low_ai_confidence", result.left_eye.safety_flags)
-        self.assertEqual(result.review_status, "draft")
 
     def test_automatic_pdf_contains_valid_pdf_header(self):
         result = self.analyze(ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter()))

@@ -1,12 +1,11 @@
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional
 
 
 class EyeReviewPayload(BaseModel):
     final_dr_grade: int = Field(..., ge=0, le=4)
     is_agree_with_ai: bool
     clinical_notes: Optional[str] = None
-    image_quality: Literal["Good", "Fair", "Poor"]
 
 
 class RecallSettingsPayload(BaseModel):
@@ -16,9 +15,15 @@ class RecallSettingsPayload(BaseModel):
 
 
 class ReviewCreate(BaseModel):
-    left_eye_review: EyeReviewPayload
-    right_eye_review: EyeReviewPayload
+    left_eye_review: Optional[EyeReviewPayload] = None
+    right_eye_review: Optional[EyeReviewPayload] = None
     recall_settings: RecallSettingsPayload
+
+    @model_validator(mode="after")
+    def require_at_least_one_eye(self):
+        if self.left_eye_review is None and self.right_eye_review is None:
+            raise ValueError("At least one eye review is required.")
+        return self
 
 
 class ReviewResponse(BaseModel):

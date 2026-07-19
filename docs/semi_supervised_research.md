@@ -51,6 +51,13 @@ ProtoNet là một kiến trúc FSL dựa trên không gian nhúng (metric-based
 
 Để hỗ trợ thực hành, Thành viên 3 sẽ làm việc chính tại thư mục `ai/semi_supervised/` với các file đã được tạo khung sẵn:
 
-1. `ai/semi_supervised/semi_supervised_training.py`: scaffold pseudo-labeling; chưa phải kết quả thí nghiệm nếu thiếu baseline và test set.
-2. `ai/semi_supervised/few_shot_demo.py`: ProtoNet demo trên dữ liệu giả lập; không dùng accuracy demo làm metric y khoa.
-3. `ai/semi_supervised/README.md`: trạng thái, giới hạn và điều kiện đưa model vào production.
+1. `ai/semi_supervised/semi_supervised_training.py`: nạp best checkpoint RETFound,
+   tạo pseudo-label từ ảnh ngoài và chọn model bằng validation QWK.
+2. `ai/semi_supervised/few_shot_demo.py`: ProtoNet episodic trên ảnh thật, dùng
+   RETFound làm encoder; train episode từ `train` và validation episode từ `val`.
+3. `ai/semi_supervised/Semi_Supervised_Few_Shot_Colab.ipynb`: chọn checkpoint và
+   nguồn dữ liệu trên Google Drive, sau đó chạy một trong hai phương pháp.
+4. `ai/semi_supervised/README.md`: cấu trúc dữ liệu, giới hạn và điều kiện an toàn.
+
+Hai pipeline không tự đánh giá `test`. Kết quả vẫn là artifact nghiên cứu cho đến
+khi phương pháp được khóa bằng validation và trải qua đánh giá test độc lập.

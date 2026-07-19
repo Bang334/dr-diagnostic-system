@@ -6,17 +6,22 @@
   bộ ảnh, rule an toàn và báo cáo.
 - Adapter HTTP gọi AI grading/segmentation thật; backend không còn sinh grade,
   mask hoặc khuyến nghị ngẫu nhiên.
-- Bốn ảnh đầu vào, bối cảnh thị lực/triệu chứng, kết quả từng mắt, trạng thái
-  `draft`, bác sĩ confirm và báo cáo PDF.
+- Prototype hiện nhận tối đa một ảnh fundus cho mỗi mắt, trả kết quả từng mắt,
+  dùng trạng thái `AI_Analyzed`/`Reviewed` và bắt buộc bác sĩ xác nhận. Bộ hai
+  trường ảnh cho mỗi mắt theo quy trình mục tiêu chưa được tích hợp.
 - Database lưu bộ ảnh đĩa thị/hậu cực và snapshot assessment để báo cáo không
   tự tính lại rule sau khi model/rule đổi phiên bản.
 
 ## Semi-supervised và Few-shot
 
-Mã nghiên cứu đã được chuyển vào `ai/semi_supervised` và hiện mới gồm:
+Mã nghiên cứu trong `ai/semi_supervised` hiện gồm:
 
-- Pseudo-labeling scaffold.
-- ProtoNet demo dùng tensor giả lập.
+- Pseudo-labeling dùng best checkpoint RETFound, ảnh ngoài chưa nhãn và
+  validation QWK để chọn model.
+- ProtoNet episodic trên ảnh thật, khởi tạo encoder từ best checkpoint RETFound.
+- Notebook Colab chọn checkpoint/dataset từ Google Drive và lưu run riêng.
+
+Hai pipeline giữ kín test split và chưa phải model production.
 
 Không tìm thấy dataset, checkpoint, split, log, confidence interval hoặc bảng
 so sánh supervised baseline. Vì vậy **không được ghi là đã thử nghiệm thành
