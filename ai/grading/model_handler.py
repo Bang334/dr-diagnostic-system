@@ -2,6 +2,37 @@ import os
 import numpy as np
 import tensorflow as tf
 
+class CutOutLayer(tf.keras.layers.Layer):
+    """Random Erasing / CutOut — mask 1 vùng vuông ngẫu nhiên trên ảnh."""
+    def __init__(self, mask_size_ratio=0.15, **kwargs):
+        super().__init__(**kwargs)
+        self.mask_size_ratio = mask_size_ratio
+
+    def call(self, images, training=None):
+        if not training:
+            return images
+        batch_size = tf.shape(images)[0]
+        h = tf.shape(images)[1]
+        w = tf.shape(images)[2]
+        mask_h = tf.cast(tf.cast(h, tf.float32) * self.mask_size_ratio, tf.int32)
+        mask_w = tf.cast(tf.cast(w, tf.float32) * self.mask_size_ratio, tf.int32)
+
+        top = tf.random.uniform([batch_size, 1, 1, 1], 0, h - mask_h, dtype=tf.int32)
+        left = tf.random.uniform([batch_size, 1, 1, 1], 0, w - mask_w, dtype=tf.int32)
+
+        row_idx = tf.range(h)[tf.newaxis, :, tf.newaxis, tf.newaxis]
+        col_idx = tf.range(w)[tf.newaxis, tf.newaxis, :, tf.newaxis]
+
+        mask = ~((row_idx >= top) & (row_idx < top + mask_h) &
+                 (col_idx >= left) & (col_idx < left + mask_w))
+        mask = tf.cast(mask, images.dtype)
+        return images * mask
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"mask_size_ratio": self.mask_size_ratio})
+        return config
+
 # Mapping classes dựa trên thang chuẩn ICDR
 CLASS_NAMES = [
     "No DR",
@@ -19,7 +50,7 @@ class DRModelHandler:
         self.model_path = model_path
         self.model = None
         self.input_size = (300, 300) # EfficientNetB3 dùng size 300
-        self.model_version = "efficientnet_b3_v1.0"
+        self.model_version = "efficientnet_b3_optimized_v1.0"
         
         self._load_model()
         
@@ -38,9 +69,13 @@ class DRModelHandler:
             from tensorflow.keras.applications import EfficientNetB3
             
             data_augmentation = models.Sequential([
-                layers.RandomFlip("horizontal_and_vertical"),
-                layers.RandomRotation(0.2),
-                layers.RandomZoom((-0.1, 0.1)),
+                layers.RandomFlip("horizontal"),
+                layers.RandomRotation(0.15),
+                layers.RandomZoom((-0.15, 0.15)),
+                layers.RandomContrast(0.15),
+                layers.RandomBrightness(0.08),
+                layers.RandomTranslation(0.05, 0.05),
+                CutOutLayer(mask_size_ratio=0.1),
             ], name="data_augmentation")
 
             inputs = layers.Input(shape=(300, 300, 3))
@@ -50,17 +85,26 @@ class DRModelHandler:
             base_model = EfficientNetB3(weights=None, include_top=False, input_shape=(300, 300, 3))
             x = base_model(x, training=False)
 
-            avg_pool = layers.GlobalAveragePooling2D(name="avg_pool")(x)
-            max_pool = layers.GlobalMaxPooling2D(name="max_pool")(x)
-            x = layers.Concatenate(name="dual_pool")([avg_pool, max_pool])
+            # ---- HEAD MỚI: GeM Pooling + GELU ----
+            gem_p = 3.0
+            x = layers.Lambda(
+                lambda feat: tf.pow(
+                    tf.reduce_mean(tf.pow(tf.maximum(tf.cast(feat, tf.float32), 1e-6), gem_p), axis=[1, 2]),
+                    1.0 / gem_p
+                ),
+                name="gem_pooling"
+            )(x)
 
-            x = layers.BatchNormalization()(x)
-            x = layers.Dense(512, activation='relu', name="head_dense1")(x)
-            x = layers.Dropout(0.5)(x)
-            x = layers.Dense(128, activation='relu', name="head_dense2")(x)
-            x = layers.Dropout(0.3)(x)
+            x = layers.BatchNormalization(name="head_bn")(x)
+            x = layers.Dense(512, name="head_dense1")(x)
+            x = layers.Activation('gelu', name="head_gelu1")(x)
+            x = layers.Dropout(0.4, name="head_drop1")(x)
+            x = layers.Dense(256, name="head_dense2")(x)
+            x = layers.Activation('gelu', name="head_gelu2")(x)
+            x = layers.Dropout(0.25, name="head_drop2")(x)
 
-            outputs = layers.Dense(5, activation='softmax', dtype='float32', name="predictions")(x)
+            # CORAL Ordinal Output: 4 sigmoid neurons
+            outputs = layers.Dense(4, activation='sigmoid', dtype='float32', name="ordinal_output")(x)
             self.model = models.Model(inputs, outputs)
             
             # Load trọng số vào khung kiến trúc đã dựng chuẩn
@@ -97,15 +141,29 @@ class DRModelHandler:
         # Chạy inference
         predictions = self.model.predict(img_batch)
         
-        # predictions thường là mảng 2 chiều [[prob0, prob1, prob2, prob3, prob4]]
-        # Nếu mô hình trả về logit, hàm tính xác suất sẽ phải dùng Softmax, 
-        # nhưng thông thường layer cuối đã có activation='softmax'.
-        probs = predictions[0].tolist()
+        # CORAL Ordinal: Output là 4 xác suất tích lũy [P(Y>0), P(Y>1), P(Y>2), P(Y>3)]
+        ordinal_probs = predictions[0].tolist()
         
-        # Đảm bảo tổng xác suất = 1 (tránh sai số float)
-        probs = [float(p) / sum(probs) for p in probs]
+        # Lấy class theo nguyên tắc Ordinal (Đếm số lượng P(Y>k) > 0.5)
+        ordinal_predicted_class = sum(1 for p in ordinal_probs if p > 0.5)
         
-        # Lấy class có xác suất cao nhất
+        # Tính xác suất cho từng class rời rạc (One-vs-Rest / Marginal probability)
+        p0 = max(0.0, 1.0 - ordinal_probs[0])
+        p1 = max(0.0, ordinal_probs[0] - ordinal_probs[1])
+        p2 = max(0.0, ordinal_probs[1] - ordinal_probs[2])
+        p3 = max(0.0, ordinal_probs[2] - ordinal_probs[3])
+        p4 = max(0.0, ordinal_probs[3])
+        
+        probs = [p0, p1, p2, p3, p4]
+        
+        # Chuẩn hóa lại tổng = 1 (tránh sai số float)
+        total_prob = sum(probs)
+        if total_prob > 0:
+            probs = [float(p) / total_prob for p in probs]
+        else:
+            probs = [1.0 if i == ordinal_predicted_class else 0.0 for i in range(5)]
+            
+        # Lấy class có xác suất rời rạc cao nhất (Argmax) để tối đa hoá Accuracy
         predicted_class = int(np.argmax(probs))
         confidence = probs[predicted_class]
         
