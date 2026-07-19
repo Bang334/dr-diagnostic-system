@@ -34,12 +34,13 @@ Nếu bạn sử dụng PostgreSQL cài đặt trực tiếp trên hệ điều 
 
 ## 📊 Mô Hình Thực Thể Quan Hệ (ERD) Tóm Tắt
 
-* **users**: Quản lý tài khoản Bác sĩ và Admin hệ thống.
-* **patients**: Lưu thông tin hành chính bệnh nhân tiểu đường (Mã BN, HbA1c, Thời gian mắc bệnh).
-* **screenings**: Phiên khám sàng lọc của bệnh nhân. Mỗi phiên gồm ảnh chụp 2 mắt (Mắt trái - Left, Mắt phải - Right).
+* **accounts**: Chỉ quản lý đăng nhập, mật khẩu băm, vai trò và trạng thái tài khoản. Admin là một vai trò, không có bảng riêng.
+* **doctors**: Hồ sơ nghiệp vụ bác sĩ, liên kết một-một với `accounts` qua `account_id`.
+* **patients**: Hồ sơ bệnh nhân, liên kết một-một với tài khoản cổng bệnh nhân qua `account_id`.
+* **screenings**: Phiên khám sàng lọc. `created_by_account_id` lưu người thao tác; `doctor_id` chỉ trỏ đến hồ sơ bác sĩ.
 * **ai_results**: Kết quả phân loại mức độ DR tự động của AI (0 -> 4) cho từng mắt.
 * **lesion_segmentation_results**: Kết quả phân đoạn tự động các loại tổn thương (phình mạch, xuất huyết, rỉ dịch) cho từng mắt.
-* **doctor_reviews**: Bác sĩ xác nhận mức độ bệnh lý cuối cùng, điều chỉnh kết quả AI nếu có và thêm ghi chú lâm sàng.
+* **doctor_reviews**: Kết luận cuối cùng; `reviewed_by_account_id` bảo toàn audit người thao tác và `doctor_id` xác định bác sĩ chuyên môn nếu có.
 * **recalls**: Lịch tái khám tự động dựa trên mức độ nghiêm trọng của bệnh.
 
 ---

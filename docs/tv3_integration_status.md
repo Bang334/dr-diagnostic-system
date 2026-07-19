@@ -6,8 +6,9 @@
   bộ ảnh, rule an toàn và báo cáo.
 - Adapter HTTP gọi AI grading/segmentation thật; backend không còn sinh grade,
   mask hoặc khuyến nghị ngẫu nhiên.
-- Bốn ảnh đầu vào, bối cảnh thị lực/triệu chứng, kết quả từng mắt, trạng thái
-  `draft`, bác sĩ confirm và báo cáo PDF.
+- Prototype hiện nhận tối đa một ảnh fundus cho mỗi mắt, trả kết quả từng mắt,
+  dùng trạng thái `AI_Analyzed`/`Reviewed` và bắt buộc bác sĩ xác nhận. Bộ hai
+  trường ảnh cho mỗi mắt theo quy trình mục tiêu chưa được tích hợp.
 - Database lưu bộ ảnh đĩa thị/hậu cực và snapshot assessment để báo cáo không
   tự tính lại rule sau khi model/rule đổi phiên bản.
 

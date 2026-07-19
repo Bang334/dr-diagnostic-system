@@ -6,6 +6,8 @@ bác sĩ/chuyên khoa mắt xác nhận.
 | Rule/Interface | Nguồn hoặc loại | Cách dùng an toàn |
 | --- | --- | --- |
 | ICDR Grade 0–4 | ICDR; QĐ 2558/QĐ-BYT | Dự đoán riêng từng mắt; Grade 3/4 luôn cần specialist confirmation. |
+| Nhận định hỗ trợ chẩn đoán DR | QĐ 2558/QĐ-BYT; ICDR | Kết hợp grade, confidence và tổn thương quan sát được; luôn nêu giới hạn và cần bác sĩ xác nhận. |
+| Không thấy DR trên ảnh | QĐ 2558/QĐ-BYT; ADA 2026 | Không được diễn giải thành không mắc đái tháo đường; nếu nghi ngờ đái tháo đường phải dùng xét nghiệm chuẩn. |
 | Hai ảnh mỗi mắt | QĐ 2557/QĐ-BYT | Ảnh đĩa thị và hậu cực/hoàng điểm; đúng người, đúng mắt. |
 | Thị lực < 5/10 | QĐ 2558/QĐ-BYT | Chuyển chuyên khoa kể cả ảnh không phát hiện DR. |
 | Grade 3 | QĐ 2558/QĐ-BYT | Chuyển chuyên khoa, đánh giá không quá 3 tháng và sớm hơn theo bệnh cảnh. |
@@ -30,4 +32,6 @@ bác sĩ/chuyên khoa mắt xác nhận.
 - QĐ 2558/QĐ-BYT ngày 20/9/2022.
 - Wilkinson et al., ICDR disease severity scale, 2003.
 - ADA Standards of Care in Diabetes 2026, Retinopathy.
+- Luật Khám bệnh, chữa bệnh 15/2023/QH15; Luật Bảo vệ dữ liệu cá nhân
+  91/2025/QH15.
 - Nghị định 13/2023/NĐ-CP; Nghị định 98/2021/NĐ-CP sửa đổi bởi 07/2023/NĐ-CP.

@@ -44,7 +44,9 @@ def clinical_report_pdf(patient: Dict[str, Any], assessment: Dict[str, Any]) -> 
     line(f"Ưu tiên rà soát: {assessment.get('overall_priority', '—')}")
 
     for key, label in (("left_eye", "MẮT TRÁI"), ("right_eye", "MẮT PHẢI")):
-        eye = assessment[key]
+        eye = assessment.get(key)
+        if not eye:
+            continue
         grading = eye["grading"]
         pdf.ln(3)
         line(label, 12, 6)
@@ -61,6 +63,20 @@ def clinical_report_pdf(patient: Dict[str, Any], assessment: Dict[str, Any]) -> 
             line(f"  • {lesion.get('label', lesion.get('key'))}: {state}; area={lesion.get('area_pct', 0)}% (chỉ số kỹ thuật)")
         for action in eye.get("actions", []):
             line(f"  • {action}")
+
+    summary = assessment.get("clinical_summary")
+    if summary:
+        pdf.ln(3)
+        line("TÓM TẮT HỒ SƠ LÂM SÀNG – DỰ THẢO AI", 12, 6)
+        line(summary.get("overview", ""))
+        for finding in summary.get("key_findings", []):
+            line(f"  • {finding}")
+        line(f"Theo dõi tham khảo: {summary.get('follow_up', '—')}")
+        line(
+            f"Nguồn soạn thảo: {summary.get('provider', '—')} / {summary.get('model', '—')}",
+            9,
+            5,
+        )
 
     pdf.ln(3)
     line("Nguồn áp dụng: " + ", ".join(assessment.get("guideline_ids", [])))
