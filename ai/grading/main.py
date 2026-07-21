@@ -12,7 +12,7 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from ai.preprocessing.fundus_prep import preprocess_fundus_array
+from ai.preprocessing.fundus_prep import preprocess_rgb_crop_512_from_bgr
 from ai.grading.model_handler import DRModelHandler
 
 app = FastAPI(
@@ -35,7 +35,9 @@ os.makedirs(WEIGHTS_DIR, exist_ok=True)
 MODEL_PATH = os.environ.get(
     "DR_MODEL_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_model.keras")
 )
-PREPROCESS_ENHANCE = os.environ.get("DR_PREPROCESS_ENHANCE", "0") == "1"
+THRESHOLD_PATH = os.environ.get(
+    "DR_THRESHOLD_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_thresholds.npy")
+)
 
 # Khởi tạo thư mục tạm để lưu ảnh upload
 TEMP_DIR = os.path.join(project_root, "ai", "grading", "temp_uploads")
@@ -54,7 +56,10 @@ async def startup_event():
         print(f"[!] Chưa có file model tại {MODEL_PATH}")
         print("[!] Bạn hãy copy file model thật của bạn đè lên đường dẫn này nhé.")
 
-    dr_model = DRModelHandler(model_path=MODEL_PATH)
+    dr_model = DRModelHandler(
+        model_path=MODEL_PATH,
+        threshold_path=THRESHOLD_PATH,
+    )
 
 @app.get("/")
 def root():
@@ -73,6 +78,10 @@ def get_model_info():
     
     return {
         "model_path": MODEL_PATH,
+        "threshold_path": THRESHOLD_PATH,
+        "ordinal_thresholds": (
+            dr_model.thresholds.tolist() if dr_model and dr_model.model is not None else None
+        ),
         "last_modified": last_modified,
         "size_MB": size_mb,
         "model_version": dr_model.model_version if dr_model else "Unknown"
@@ -106,18 +115,15 @@ async def analyze_fundus(file: UploadFile = File(...)):
         if img is None:
             raise HTTPException(status_code=400, detail="Không thể đọc hoặc xử lý ảnh. Ảnh có thể bị hỏng.")
 
-        # The same colour-preserving crop/resize is used by ai/grading/train.py.
-        preprocessed_img = preprocess_fundus_array(
-            img,
-            img_size=dr_model.input_size[0],
-            enhance=PREPROCESS_ENHANCE,
-        )
+        # Match the colour-preserving rgb_crop_512 training dataset.
+        preprocessed_img = preprocess_rgb_crop_512_from_bgr(img)
 
         # 4. Dự đoán qua Model (Inference)
         result = dr_model.predict(preprocessed_img)
         
         # 5. (Tùy chọn) Mã hóa ảnh đã tiền xử lý thành Base64 để Backend xem trước
-        _, buffer = cv2.imencode('.png', preprocessed_img)
+        preview_bgr = cv2.cvtColor(preprocessed_img, cv2.COLOR_RGB2BGR)
+        _, buffer = cv2.imencode('.png', preview_bgr)
         b64_string = base64.b64encode(buffer).decode('utf-8')
         result["preprocessed_preview_b64"] = f"data:image/png;base64,{b64_string}"
         

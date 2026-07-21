@@ -1,187 +1,271 @@
 import os
+import json
+import zipfile
+
+import cv2
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import EfficientNetB3
+from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
 
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
 class CutOutLayer(tf.keras.layers.Layer):
-    """Random Erasing / CutOut — mask 1 vùng vuông ngẫu nhiên trên ảnh."""
     def __init__(self, mask_size_ratio=0.15, **kwargs):
         super().__init__(**kwargs)
         self.mask_size_ratio = mask_size_ratio
 
     def call(self, images, training=None):
-        if not training:
+        if not training or self.mask_size_ratio <= 0:
             return images
         batch_size = tf.shape(images)[0]
-        h = tf.shape(images)[1]
-        w = tf.shape(images)[2]
-        mask_h = tf.cast(tf.cast(h, tf.float32) * self.mask_size_ratio, tf.int32)
-        mask_w = tf.cast(tf.cast(w, tf.float32) * self.mask_size_ratio, tf.int32)
-
-        top = tf.random.uniform([batch_size, 1, 1, 1], 0, h - mask_h, dtype=tf.int32)
-        left = tf.random.uniform([batch_size, 1, 1, 1], 0, w - mask_w, dtype=tf.int32)
-
-        row_idx = tf.range(h)[tf.newaxis, :, tf.newaxis, tf.newaxis]
-        col_idx = tf.range(w)[tf.newaxis, tf.newaxis, :, tf.newaxis]
-
-        mask = ~((row_idx >= top) & (row_idx < top + mask_h) &
-                 (col_idx >= left) & (col_idx < left + mask_w))
-        mask = tf.cast(mask, images.dtype)
-        return images * mask
+        height = tf.shape(images)[1]
+        width = tf.shape(images)[2]
+        mask_height = tf.cast(tf.cast(height, tf.float32) * self.mask_size_ratio, tf.int32)
+        mask_width = tf.cast(tf.cast(width, tf.float32) * self.mask_size_ratio, tf.int32)
+        top = tf.random.uniform([batch_size, 1, 1, 1], 0, height - mask_height, dtype=tf.int32)
+        left = tf.random.uniform([batch_size, 1, 1, 1], 0, width - mask_width, dtype=tf.int32)
+        rows = tf.range(height)[tf.newaxis, :, tf.newaxis, tf.newaxis]
+        columns = tf.range(width)[tf.newaxis, tf.newaxis, :, tf.newaxis]
+        mask = ~(
+            (rows >= top)
+            & (rows < top + mask_height)
+            & (columns >= left)
+            & (columns < left + mask_width)
+        )
+        return images * tf.cast(mask, images.dtype)
 
     def get_config(self):
         config = super().get_config()
         config.update({"mask_size_ratio": self.mask_size_ratio})
         return config
 
-# Mapping classes dựa trên thang chuẩn ICDR
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+class PreprocessInputLayer(tf.keras.layers.Layer):
+    def __init__(self, model_name="EfficientNetB3", **kwargs):
+        super().__init__(**kwargs)
+        self.model_name = model_name
+
+    def call(self, inputs):
+        if self.model_name == "EfficientNetB3":
+            return effnet_preprocess(inputs)
+        return inputs
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"model_name": self.model_name})
+        return config
+
+
+@tf.keras.utils.register_keras_serializable(package="Custom")
+class GeMPoolingLayer(tf.keras.layers.Layer):
+    def __init__(self, p=3.0, **kwargs):
+        super().__init__(**kwargs)
+        self.p = p
+
+    def call(self, inputs):
+        inputs = tf.maximum(tf.cast(inputs, tf.float32), 1e-6)
+        return tf.pow(
+            tf.reduce_mean(tf.pow(inputs, self.p), axis=[1, 2]),
+            1.0 / self.p,
+        )
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"p": self.p})
+        return config
+
+
 CLASS_NAMES = [
     "No DR",
     "Mild NPDR",
     "Moderate NPDR",
     "Severe NPDR",
-    "Proliferative DR"
+    "Proliferative DR",
 ]
 
+# Calibrated on the validation split for best_EfficientNetB3_rgb_crop_v1.keras.
+# Each value belongs to one CORAL boundary: Y>0, Y>1, Y>2, and Y>3.
+DEFAULT_ORDINAL_THRESHOLDS = np.array(
+    [0.55, 0.50, 0.435, 0.31], dtype=np.float32
+)
+
+
 class DRModelHandler:
-    def __init__(self, model_path: str):
-        """
-        Khởi tạo và load model TensorFlow/Keras (EfficientNet-B3) vào RAM.
-        """
+    def __init__(self, model_path: str, threshold_path: str | None = None):
         self.model_path = model_path
+        self.threshold_path = threshold_path
         self.model = None
-        self.input_size = (300, 300) # EfficientNetB3 dùng size 300
-        self.model_version = "efficientnet_b3_optimized_v1.0"
-        
+        self.input_size = (384, 384)
+        self.thresholds = DEFAULT_ORDINAL_THRESHOLDS.copy()
+        self.model_version = "efficientnet_b3_rgb_crop_v1"
         self._load_model()
-        
-    def _load_model(self):
-        if not os.path.exists(self.model_path) or os.path.getsize(self.model_path) == 0:
-            print(f"[!] CẢNH BÁO: Không tìm thấy file model tại {self.model_path}")
-            print("[!] Vui lòng copy file model (.keras) của bạn vào đường dẫn này.")
-            return
-            
-        print(f"[*] Đang load model từ {self.model_path}...")
+
+    def _read_saved_model_config(self):
+        defaults = {
+            "input_shape": (384, 384, 3),
+            "head_dense1_units": 256,
+            "head_dense2_units": 256,
+            "head_drop1_rate": 0.4,
+            "head_drop2_rate": 0.25,
+        }
         try:
-            # KHẮC PHỤC LỖI KHÁC VERSION KERAS (quantization_config):
-            # Tự build lại ĐÚNG y hệt kiến trúc model thay vì dùng load_model để tránh lỗi parse config.
-            from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
-            from tensorflow.keras import layers, models
-            from tensorflow.keras.applications import EfficientNetB3
-            
-            data_augmentation = models.Sequential([
+            with zipfile.ZipFile(self.model_path) as archive:
+                config = json.loads(archive.read("config.json"))
+            for layer in config["config"]["layers"]:
+                layer_config = layer.get("config", {})
+                name = layer_config.get("name")
+                if layer["class_name"] == "InputLayer" and layer_config.get("batch_shape"):
+                    defaults["input_shape"] = tuple(layer_config["batch_shape"][1:])
+                elif name == "head_dense1":
+                    defaults["head_dense1_units"] = int(layer_config["units"])
+                elif name == "head_dense2":
+                    defaults["head_dense2_units"] = int(layer_config["units"])
+                elif name == "head_drop1":
+                    defaults["head_drop1_rate"] = float(layer_config["rate"])
+                elif name == "head_drop2":
+                    defaults["head_drop2_rate"] = float(layer_config["rate"])
+        except Exception as exc:
+            print(f"[!] Could not read model config; using fallback defaults: {exc}")
+        return defaults
+
+    def _build_compatible_model(self):
+        """Rebuild the training graph for Keras-version-compatible weight loading."""
+        saved_config = self._read_saved_model_config()
+        input_shape = saved_config["input_shape"]
+
+        augmentation = models.Sequential(
+            [
                 layers.RandomFlip("horizontal"),
-                layers.RandomRotation(0.15),
+                layers.RandomRotation(0.05),
                 layers.RandomZoom((-0.15, 0.15)),
-                layers.RandomContrast(0.15),
-                layers.RandomBrightness(0.08),
-                layers.RandomTranslation(0.05, 0.05),
-                CutOutLayer(mask_size_ratio=0.1),
-            ], name="data_augmentation")
+                layers.RandomContrast(0.10),
+                layers.RandomTranslation(0.02, 0.02),
+                CutOutLayer(mask_size_ratio=0.0),
+            ],
+            name="data_augmentation",
+        )
 
-            inputs = layers.Input(shape=(300, 300, 3))
-            x = data_augmentation(inputs)
-            x = layers.Lambda(effnet_preprocess, name="preprocess_input")(x)
-            
-            # In inference the complete trained checkpoint is loaded below, so
-            # downloading ImageNet weights here would be redundant.
-            base_model = EfficientNetB3(weights=None, include_top=False, input_shape=(300, 300, 3))
-            x = base_model(x, training=False)
+        inputs = layers.Input(shape=input_shape)
+        features = augmentation(inputs)
+        features = PreprocessInputLayer(
+            model_name="EfficientNetB3", name="preprocess_input"
+        )(features)
+        backbone = EfficientNetB3(
+            weights=None,
+            include_top=False,
+            input_shape=input_shape,
+        )
+        features = backbone(features, training=False)
+        features = GeMPoolingLayer(p=3.0, name="gem_pooling")(features)
+        features = layers.BatchNormalization(name="head_bn")(features)
+        features = layers.Dense(
+            saved_config["head_dense1_units"], name="head_dense1"
+        )(features)
+        features = layers.Activation("gelu", name="head_gelu1")(features)
+        features = layers.Dropout(saved_config["head_drop1_rate"], name="head_drop1")(
+            features
+        )
+        features = layers.Dense(
+            saved_config["head_dense2_units"], name="head_dense2"
+        )(features)
+        features = layers.Activation("gelu", name="head_gelu2")(features)
+        features = layers.Dropout(saved_config["head_drop2_rate"], name="head_drop2")(
+            features
+        )
+        outputs = layers.Dense(
+            4,
+            activation="sigmoid",
+            dtype="float32",
+            name="ordinal_output",
+        )(features)
+        return models.Model(inputs, outputs)
 
-            # ---- HEAD MỚI: GeM Pooling + GELU ----
-            gem_p = 3.0
-            x = layers.Lambda(
-                lambda feat: tf.pow(
-                    tf.reduce_mean(tf.pow(tf.maximum(tf.cast(feat, tf.float32), 1e-6), gem_p), axis=[1, 2]),
-                    1.0 / gem_p
-                ),
-                name="gem_pooling"
-            )(x)
+    def _load_model(self):
+        if not os.path.isfile(self.model_path) or os.path.getsize(self.model_path) == 0:
+            print(f"[!] Model file not found: {self.model_path}")
+            return
 
-            x = layers.BatchNormalization(name="head_bn")(x)
-            x = layers.Dense(512, name="head_dense1")(x)
-            x = layers.Activation('gelu', name="head_gelu1")(x)
-            x = layers.Dropout(0.4, name="head_drop1")(x)
-            x = layers.Dense(256, name="head_dense2")(x)
-            x = layers.Activation('gelu', name="head_gelu2")(x)
-            x = layers.Dropout(0.25, name="head_drop2")(x)
+        try:
+            try:
+                self.model = tf.keras.models.load_model(
+                    self.model_path,
+                    compile=False,
+                    safe_mode=False,
+                    custom_objects={
+                        "CutOutLayer": CutOutLayer,
+                        "PreprocessInputLayer": PreprocessInputLayer,
+                        "GeMPoolingLayer": GeMPoolingLayer,
+                        "preprocess_input": effnet_preprocess,
+                    },
+                )
+            except Exception as load_error:
+                print(f"[!] Full-model load failed ({load_error}); loading weights instead")
+                self.model = self._build_compatible_model()
+                self.model.load_weights(self.model_path)
+            height, width = self.model.input_shape[1:3]
+            self.input_size = (int(width), int(height))
 
-            # CORAL Ordinal Output: 4 sigmoid neurons
-            outputs = layers.Dense(4, activation='sigmoid', dtype='float32', name="ordinal_output")(x)
-            self.model = models.Model(inputs, outputs)
-            
-            # Load trọng số vào khung kiến trúc đã dựng chuẩn
-            self.model.load_weights(self.model_path)
-            print("[v] Load model thành công!")
-        except Exception as e:
-            print(f"[x] Lỗi khi load model: {e}")
-            
+            if self.threshold_path and os.path.isfile(self.threshold_path):
+                thresholds = np.load(self.threshold_path).astype(np.float32).reshape(-1)
+                if thresholds.shape != (4,):
+                    raise ValueError(f"Expected 4 ordinal thresholds, received {thresholds.shape}")
+                if not np.all(np.isfinite(thresholds)) or np.any(
+                    (thresholds < 0.0) | (thresholds > 1.0)
+                ):
+                    raise ValueError(
+                        f"Ordinal thresholds must be finite values in [0, 1]: {thresholds}"
+                    )
+                self.thresholds = thresholds
+            else:
+                print(
+                    "[!] Threshold file not found; using calibrated defaults "
+                    f"{self.thresholds.tolist()}"
+                )
+
+            print(
+                f"[v] Loaded {self.model_path} | input={self.input_size} "
+                f"| thresholds={self.thresholds.tolist()}"
+            )
+        except Exception as exc:
+            self.model = None
+            print(f"[x] Could not load grading model: {exc}")
+
     def predict(self, preprocessed_img: np.ndarray):
-        """
-        Thực hiện dự đoán dựa trên ảnh đã tiền xử lý.
-        preprocessed_img: numpy array từ OpenCV (BGR)
-        """
+        """Predict one RGB image produced by preprocess_rgb_crop_512_from_bgr."""
         if self.model is None:
-            raise ValueError("Model chưa được load. Vui lòng kiểm tra lại file .h5.")
-            
-        import cv2
-        
-        # Match the input size used by this checkpoint.
-        img_resized = cv2.resize(preprocessed_img, self.input_size)
-        
-        # Chuyển BGR (OpenCV mặc định) sang RGB (TensorFlow/Keras thường dùng)
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        
-        # Chuyển kiểu dữ liệu sang float32 và normalize nếu cần
-        # Lưu ý: Các pre-trained models của tf.keras.applications.efficientnet 
-        # đã tích hợp sẵn lớp Rescaling nội bộ, nhưng nếu lúc train bạn tự normalize (/255.0) 
-        # thì bạn cần bật cờ normalize ở đây. Giả định model tự xử lý hoặc đã chuẩn hóa.
-        img_tensor = img_rgb.astype('float32')
-        
-        # Keras requires a batch dimension.
-        img_batch = np.expand_dims(img_tensor, axis=0)
-        
-        # Chạy inference
-        predictions = self.model.predict(img_batch, verbose=0)
-        
-        # CORAL Ordinal: Output là 4 xác suất tích lũy [P(Y>0), P(Y>1), P(Y>2), P(Y>3)]
-        ordinal_probs = predictions[0].tolist()
-        
-        # Lấy class theo nguyên tắc Ordinal (Đếm số lượng P(Y>k) > 0.5)
-        ordinal_predicted_class = sum(1 for p in ordinal_probs if p > 0.5)
-        
-        # Tính xác suất cho từng class rời rạc (One-vs-Rest / Marginal probability)
-        p0 = max(0.0, 1.0 - ordinal_probs[0])
-        p1 = max(0.0, ordinal_probs[0] - ordinal_probs[1])
-        p2 = max(0.0, ordinal_probs[1] - ordinal_probs[2])
-        p3 = max(0.0, ordinal_probs[2] - ordinal_probs[3])
-        p4 = max(0.0, ordinal_probs[3])
-        
-        probs = [p0, p1, p2, p3, p4]
-        
-        # Chuẩn hóa lại tổng = 1 (tránh sai số float)
-        total_prob = sum(probs)
-        if total_prob > 0:
-            probs = [float(p) / total_prob for p in probs]
-        else:
-            probs = [1.0 if i == ordinal_predicted_class else 0.0 for i in range(5)]
-            
-        # Lấy class có xác suất rời rạc cao nhất (Argmax) để tối đa hoá Accuracy
-        predicted_class = int(np.argmax(probs))
-        confidence = probs[predicted_class]
-        
-        # Format kết quả theo chuẩn api_contract_ai.md
-        result = {
+            raise ValueError("Grading model is not loaded")
+
+        image = cv2.resize(preprocessed_img, self.input_size, interpolation=cv2.INTER_AREA)
+        image = image.astype(np.float32)
+        original = np.expand_dims(image, axis=0)
+        flipped = np.flip(original, axis=2).copy()
+
+        original_probs = self.model.predict(original, verbose=0)
+        flipped_probs = self.model.predict(flipped, verbose=0)
+        ordinal_probs = ((original_probs + flipped_probs) / 2.0)[0]
+        ordinal_probs = np.minimum.accumulate(ordinal_probs)
+
+        predicted_class = int(np.sum(ordinal_probs > self.thresholds))
+        class_probs = np.diff(
+            -np.concatenate(([1.0], ordinal_probs, [0.0]))
+        )
+        class_probs = np.clip(class_probs, 0.0, 1.0)
+        total = float(class_probs.sum())
+        if total > 0:
+            class_probs = class_probs / total
+
+        return {
             "dr_grade": predicted_class,
             "dr_label": CLASS_NAMES[predicted_class],
-            "confidence": round(confidence, 4),
+            "confidence": round(float(class_probs[predicted_class]), 4),
             "probabilities": {
-                "No DR": round(probs[0], 4),
-                "Mild NPDR": round(probs[1], 4),
-                "Moderate NPDR": round(probs[2], 4),
-                "Severe NPDR": round(probs[3], 4),
-                "Proliferative DR": round(probs[4], 4)
+                name: round(float(probability), 4)
+                for name, probability in zip(CLASS_NAMES, class_probs)
             },
-            "model_version": self.model_version
+            "ordinal_probabilities": [round(float(value), 4) for value in ordinal_probs],
+            "ordinal_thresholds": [round(float(value), 4) for value in self.thresholds],
+            "model_version": self.model_version,
         }
-        
-        return result

@@ -18,6 +18,14 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+BLACK_THRESHOLD = 10
+CROP_MARGIN_RATIO = 0.03
+MIN_FUNDUS_AREA_RATIO = 0.20
+BEN_GRAHAM_ALPHA = 4.0
+BEN_GRAHAM_BETA = -4.0
+BEN_GRAHAM_GAMMA = 128.0
+BEN_GRAHAM_SIGMA_RATIO = 1 / 30
+
 
 def crop_image_from_gray(image: np.ndarray, tol: int = 7) -> np.ndarray:
     """Remove the black camera border while preserving every colour channel."""
@@ -38,6 +46,87 @@ def crop_image_from_gray(image: np.ndarray, tol: int = 7) -> np.ndarray:
     rows = np.flatnonzero(mask.any(axis=1))
     cols = np.flatnonzero(mask.any(axis=0))
     return image[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1].copy()
+
+
+def crop_fundus_rgb(image_rgb: np.ndarray) -> np.ndarray:
+    """Match train_mode_B3.py fundus crop using thresholded contours."""
+    if image_rgb is None or image_rgb.size == 0:
+        raise ValueError("Fundus image is empty")
+    if image_rgb.ndim != 3 or image_rgb.shape[2] != 3:
+        raise ValueError(f"Expected HxWx3 RGB image, received {image_rgb.shape}")
+
+    img = image_rgb.copy()
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    _, mask = cv2.threshold(gray, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return img
+
+    contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(contour)
+    if area < MIN_FUNDUS_AREA_RATIO * h * w:
+        return img
+
+    x, y, bw, bh = cv2.boundingRect(contour)
+    margin = int(round(max(bw, bh) * CROP_MARGIN_RATIO))
+    x1 = max(0, x - margin)
+    y1 = max(0, y - margin)
+    x2 = min(w, x + bw + margin)
+    y2 = min(h, y + bh + margin)
+    return img[y1:y2, x1:x2].copy()
+
+
+def resize_with_padding_rgb(image_rgb: np.ndarray, target_size: int = 512) -> np.ndarray:
+    """Resize while preserving aspect ratio, then pad to a square RGB image."""
+    h, w = image_rgb.shape[:2]
+    scale = min(target_size / w, target_size / h)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+    x = (target_size - new_w) // 2
+    y = (target_size - new_h) // 2
+    canvas[y : y + new_h, x : x + new_w] = resized
+    return canvas
+
+
+def ben_graham_preprocess_rgb(image_rgb: np.ndarray) -> np.ndarray:
+    """Match train_mode_B3.py RGB Ben Graham preprocessing."""
+    img = image_rgb.astype(np.float32)
+    sigma = max(image_rgb.shape[:2]) * BEN_GRAHAM_SIGMA_RATIO
+    blurred = cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    processed = cv2.addWeighted(
+        img,
+        BEN_GRAHAM_ALPHA,
+        blurred,
+        BEN_GRAHAM_BETA,
+        BEN_GRAHAM_GAMMA,
+    )
+    processed = np.clip(processed, 0, 255).astype(np.uint8)
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    mask = (gray > BLACK_THRESHOLD).astype(np.uint8)
+    processed[mask == 0] = 0
+    return processed
+
+
+def preprocess_bengraham_512_from_bgr(image_bgr: np.ndarray) -> np.ndarray:
+    """Create the same RGB image as train_mode_B3.py rgb_bengraham_512."""
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    cropped = crop_fundus_rgb(image_rgb)
+    enhanced = ben_graham_preprocess_rgb(cropped)
+    return resize_with_padding_rgb(enhanced, 512)
+
+
+def preprocess_rgb_crop_512_from_bgr(image_bgr: np.ndarray) -> np.ndarray:
+    """Create the same colour-preserving RGB crop used by rgb_crop_512."""
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    cropped = crop_fundus_rgb(image_rgb)
+    return resize_with_padding_rgb(cropped, 512)
 
 
 def ben_graham_enhance(image_bgr: np.ndarray, sigma: float = 10.0) -> np.ndarray:
