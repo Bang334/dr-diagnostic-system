@@ -298,8 +298,11 @@ def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes, verbose:
         still_missing = [v for v in model.variables if id(v) not in assigned_var_ids]
         print(f"  [!] Still unassigned after both passes:")
         for v in still_missing:
-            print(f"      - {v.name}  shape={tuple(v.shape)}  dtype={v.dtype.name}")
+            dtype_str = getattr(v.dtype, "name", str(v.dtype))
+            var_name = getattr(v, "name", "unknown")
+            print(f"      - {var_name}  shape={tuple(v.shape)}  dtype={dtype_str}")
     return total_assigned
+
 
 
 def load_keras_grade_model(
