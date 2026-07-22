@@ -398,6 +398,8 @@ def generate_pseudo_labels_keras(
         img = tf.image.decode_image(img_raw, channels=3, expand_animations=False)
         img = tf.image.resize(img, input_size)
         img = tf.cast(img, tf.float32)
+        img = tf.clip_by_value(img, 0.0, 255.0)
+        img = tf.where(tf.math.is_finite(img), img, tf.zeros_like(img))
         return img, path_str
 
     path_strings = [os.fspath(p.resolve()) for p in image_paths]
@@ -501,6 +503,8 @@ def create_semi_tf_dataset(
         img = tf.image.decode_image(img_raw, channels=3, expand_animations=False)
         img = tf.image.resize(img, input_size)
         img = tf.cast(img, tf.float32)
+        img = tf.clip_by_value(img, 0.0, 255.0)
+        img = tf.where(tf.math.is_finite(img), img, tf.zeros_like(img))
         if is_coral:
             # CORAL label target: binary vector of length 4 for DR > 0, DR > 1, DR > 2, DR > 3
             # Grade 0 -> [0,0,0,0], Grade 1 -> [1,0,0,0], Grade 2 -> [1,1,0,0], Grade 3 -> [1,1,1,0], Grade 4 -> [1,1,1,1]
@@ -586,11 +590,15 @@ def train_keras_semi_supervised(
     )
 
     # 5. Compile Model
-    # Add clipnorm=1.0 to prevent gradient explosion (NaN loss) during deep network fine-tuning
     optimizer = optimizers.Adam(learning_rate=lr, clipnorm=1.0)
 
+    def nan_safe_binary_crossentropy(y_true, y_pred):
+        """Binary crossentropy that zeros out NaN/Inf to prevent gradient corruption."""
+        loss = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+        return tf.where(tf.math.is_finite(loss), loss, tf.zeros_like(loss))
+
     if is_coral:
-        loss_fn = "binary_crossentropy"
+        loss_fn = nan_safe_binary_crossentropy
         metrics_list = ["binary_accuracy", "mae"]
     else:
         loss_fn = "categorical_crossentropy"
@@ -642,6 +650,113 @@ def train_keras_semi_supervised(
 
     print(f"[v] Training complete! Best checkpoint saved to: {best_model_path}")
     return best_model_path
+
+
+def evaluate_on_test_set(
+    model: tf.keras.Model,
+    test_dir,
+    input_size: Tuple[int, int] = (300, 300),
+    batch_size: int = 16,
+) -> dict:
+    """
+    Evaluate model on a test set organized as dir/0..4/ class subfolders.
+    Supports CORAL (4 sigmoid outputs) and standard softmax (5 outputs).
+    Returns dict with overall_accuracy, per_class_accuracy, confusion_matrix.
+    """
+    test_root = Path(test_dir).resolve()
+
+    # Search for directory containing class subfolders 0..4
+    found = None
+    search_names = {'test', 'testing', 'val', 'validation'}
+    for candidate_dir in sorted(test_root.rglob('*')):
+        if not candidate_dir.is_dir():
+            continue
+        if candidate_dir.name.lower() not in search_names:
+            continue
+        class_dirs = {p.name for p in candidate_dir.iterdir() if p.is_dir() and p.name in {'0','1','2','3','4'}}
+        if class_dirs == {'0','1','2','3','4'}:
+            found = candidate_dir
+            break
+    if found is None:
+        # Fallback: check root itself
+        class_dirs = {p.name for p in test_root.iterdir() if p.is_dir() and p.name in {'0','1','2','3','4'}}
+        if class_dirs == {'0','1','2','3','4'}:
+            found = test_root
+    if found is None:
+        raise ValueError(f'Không tìm thấy thư mục test/val với các lớp 0..4 trong {test_root}')
+
+    # Collect all image paths and labels
+    paths, labels = [], []
+    for grade in range(5):
+        grade_dir = found / str(grade)
+        for img_path in sorted(grade_dir.rglob('*')):
+            if img_path.is_file() and img_path.suffix.lower() in IMAGE_EXTENSIONS:
+                paths.append(str(img_path))
+                labels.append(grade)
+
+    print(f'[*] Evaluating on {len(paths):,} test images from {found}')
+
+    num_outputs = int(model.output_shape[-1])
+    is_coral = (num_outputs == 4)
+
+    def parse_eval_img(path_str, label):
+        img_raw = tf.io.read_file(path_str)
+        img = tf.image.decode_image(img_raw, channels=3, expand_animations=False)
+        img = tf.image.resize(img, input_size)
+        img = tf.cast(img, tf.float32)
+        img = tf.clip_by_value(img, 0.0, 255.0)
+        img = tf.where(tf.math.is_finite(img), img, tf.zeros_like(img))
+        return img, label
+
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+    ds = ds.map(parse_eval_img, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    all_preds, all_labels = [], []
+    for batch_imgs, batch_labels in ds:
+        preds = model(batch_imgs, training=False)
+        if is_coral:
+            pred_grades = tf.reduce_sum(tf.cast(preds > 0.5, tf.int32), axis=1)
+        else:
+            pred_grades = tf.cast(tf.argmax(preds, axis=1), tf.int32)
+        all_preds.extend(pred_grades.numpy().tolist())
+        all_labels.extend(batch_labels.numpy().tolist())
+
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+
+    overall_acc = float(np.mean(all_preds == all_labels))
+    per_class = {}
+    for g in range(5):
+        mask = all_labels == g
+        per_class[g] = float(np.mean(all_preds[mask] == g)) if mask.sum() > 0 else 0.0
+
+    conf = np.zeros((5, 5), dtype=int)
+    for t, p in zip(all_labels, all_preds):
+        conf[t][min(p, 4)] += 1
+
+    print(f"\n{'='*55}")
+    print(f"  Overall Accuracy: {overall_acc:.4f} ({int(overall_acc * len(all_labels))}/{len(all_labels)})")
+    print(f"{'='*55}")
+    for g in range(5):
+        mask = all_labels == g
+        cnt = int(mask.sum())
+        ok = int(np.sum(all_preds[mask] == g)) if cnt > 0 else 0
+        print(f"  Grade {g} ({CLASS_NAMES[g]:20s}): {per_class[g]:.4f} ({ok}/{cnt})")
+    print(f"\n  Confusion Matrix (rows=true, cols=predicted):")
+    header = '         ' + ''.join(f'  P{i}' for i in range(5))
+    print(f"  {header}")
+    for i in range(5):
+        row = f"  T{i} ({CLASS_NAMES[i][:6]:>6s})" + ''.join(f' {conf[i][j]:4d}' for j in range(5))
+        print(row)
+    print()
+
+    return {
+        'overall_accuracy': overall_acc,
+        'per_class_accuracy': per_class,
+        'confusion_matrix': conf.tolist(),
+        'total_samples': len(all_labels),
+    }
 
 
 def parse_args():
