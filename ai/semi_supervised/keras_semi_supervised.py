@@ -86,14 +86,22 @@ def load_keras_grade_model(
 ) -> tf.keras.Model:
     """
     Build EfficientNetB3 architecture and load weights from .keras or .h5 checkpoint.
-    Supports auto-detecting Single Pooling (1536 channels) vs Dual Pooling (3072 channels).
+    Robust loader trying direct load_model first, followed by custom functional and sequential fallbacks.
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
 
-    print(f"[*] Building EfficientNetB3 and loading weights from: {model_path}")
-    
-    # Attempt 1: Single GlobalAveragePooling2D (1536 channels)
+    print(f"[*] Loading Keras Grade Model from: {model_path}")
+
+    # Strategy 1: Direct Keras model load (reads model config & weights stored inside .keras zip)
+    try:
+        model = tf.keras.models.load_model(model_path, compile=False)
+        print("[v] Keras Grade Model loaded successfully via tf.keras.models.load_model!")
+        return model
+    except Exception as e_direct:
+        print(f"[!] Direct load_model failed ({e_direct}). Attempting custom architecture reconstruction...")
+
+    # Strategy 2: Single GlobalAveragePooling2D (1536 channels)
     try:
         model = build_efficientnet_b3(
             input_shape=input_shape,
@@ -107,9 +115,9 @@ def load_keras_grade_model(
         print("[v] Keras Grade Model loaded successfully (Single Pooling - 1536 channels)!")
         return model
     except Exception as e1:
-        print(f"[!] Single pooling load failed ({e1}). Trying Dual Pooling (3072 channels)...")
+        print(f"[!] Single pooling load failed. Trying Dual Pooling (3072 channels)...")
 
-    # Attempt 2: Dual Pooling (3072 channels)
+    # Strategy 3: Dual Pooling (3072 channels)
     try:
         model = build_efficientnet_b3(
             input_shape=input_shape,
@@ -123,7 +131,28 @@ def load_keras_grade_model(
         print("[v] Keras Grade Model loaded successfully (Dual Pooling - 3072 channels)!")
         return model
     except Exception as e2:
-        raise ValueError(f"Could not load weights into model checkpoint {model_path}: {e2}")
+        print(f"[!] Dual pooling load failed. Trying Simple Sequential fallback...")
+
+    # Strategy 4: Simple Sequential (Base -> GAP -> Dropout -> Dense(5))
+    try:
+        from tensorflow.keras import layers, models
+        from tensorflow.keras.applications import EfficientNetB3
+
+        base_model = EfficientNetB3(weights=None, include_top=False, input_shape=input_shape)
+        model = models.Sequential([
+            base_model,
+            layers.GlobalAveragePooling2D(),
+            layers.Dropout(0.2),
+            layers.Dense(num_classes, activation="softmax"),
+        ])
+        model.load_weights(model_path)
+        print("[v] Keras Grade Model loaded successfully (Simple Sequential)!")
+        return model
+    except Exception as e3:
+        raise ValueError(
+            f"Could not load model checkpoint from {model_path}. "
+            f"Errors: direct_load={e_direct}, single_pool={e1}, dual_pool={e2}, sequential={e3}"
+        )
 
 
 def discover_unlabeled_images(unlabeled_dir: Path) -> List[Path]:
