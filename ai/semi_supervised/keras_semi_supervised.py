@@ -123,7 +123,7 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
             name="p",
             shape=(1,),
             initializer=tf.keras.initializers.Constant(self.p_init),
-            trainable=True,
+            trainable=False,  # Prevent optimizer from moving p to unstable values
         )
 
     def build(self, input_shape):
@@ -131,15 +131,17 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
 
     def call(self, inputs, training=None):
         x = tf.clip_by_value(inputs, self.eps, tf.float32.max)
-        x = tf.pow(x, self.p)
+        p_clamped = tf.maximum(self.p, 1.0)
+        x = tf.pow(x, p_clamped)
         x = tf.reduce_mean(x, axis=[1, 2], keepdims=False)
-        x = tf.pow(x, 1.0 / self.p)
+        x = tf.pow(x, 1.0 / p_clamped)
         return x
 
     def get_config(self):
         config = super().get_config()
         config.update({"p": self.p_init, "eps": self.eps})
         return config
+
 
 
 @tf.keras.utils.register_keras_serializable(package="Custom", name="CohenKappaMetric")
