@@ -17,10 +17,11 @@ def build_efficientnet_b3(
     weights: str = None,
     training_base: bool = False,
     include_augmentation: bool = True,
+    use_dual_pooling: bool = False,
 ):
     """
     Xây dựng kiến trúc EfficientNetB3 chuẩn cho classification 5 lớp DR grade.
-    Khớp 100% cấu trúc lớp với checkpoint best_EfficientNetB3_rgb_crop_v1.keras.
+    Khớp cấu trúc lớp với checkpoint best_EfficientNetB3_rgb_crop_v1.keras.
     """
     from tensorflow.keras import layers, models
     from tensorflow.keras.applications import EfficientNetB3
@@ -42,9 +43,12 @@ def build_efficientnet_b3(
     base_model = EfficientNetB3(weights=weights, include_top=False, input_shape=input_shape)
     x = base_model(x, training=training_base)
 
-    avg_pool = layers.GlobalAveragePooling2D(name="avg_pool")(x)
-    max_pool = layers.GlobalMaxPooling2D(name="max_pool")(x)
-    x = layers.Concatenate(name="dual_pool")([avg_pool, max_pool])
+    if use_dual_pooling:
+        avg_pool = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+        max_pool = layers.GlobalMaxPooling2D(name="max_pool")(x)
+        x = layers.Concatenate(name="dual_pool")([avg_pool, max_pool])
+    else:
+        x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
 
     x = layers.BatchNormalization()(x)
     x = layers.Dense(512, activation='relu', name="head_dense1")(x)
@@ -76,18 +80,31 @@ class DRModelHandler:
             
         print(f"[*] Đang load model từ {self.model_path}...")
         try:
-            # Tự build lại ĐÚNG y hệt kiến trúc model thay vì dùng load_model để tránh lỗi parse config.
             self.model = build_efficientnet_b3(
                 input_shape=(300, 300, 3),
                 num_classes=5,
                 weights=None,
                 training_base=False,
                 include_augmentation=True,
+                use_dual_pooling=False,
             )
-            
-            # Load trọng số vào khung kiến trúc đã dựng chuẩn
             self.model.load_weights(self.model_path)
-            print("[v] Load model thành công!")
+            print("[v] Load model thành công (Single Pooling)!")
+            return
+        except Exception:
+            pass
+
+        try:
+            self.model = build_efficientnet_b3(
+                input_shape=(300, 300, 3),
+                num_classes=5,
+                weights=None,
+                training_base=False,
+                include_augmentation=True,
+                use_dual_pooling=True,
+            )
+            self.model.load_weights(self.model_path)
+            print("[v] Load model thành công (Dual Pooling)!")
         except Exception as e:
             print(f"[x] Lỗi khi load model: {e}")
             
