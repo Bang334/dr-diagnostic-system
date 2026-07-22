@@ -226,11 +226,16 @@ def load_keras_grade_model(
         e1 = err
         print(f"[!] Direct load_model failed ({type(e1).__name__}: {e1}). Trying config-from-zip fallback...")
 
-    # Strategy 2: Read config.json from zip -> model_from_json -> dummy forward -> load_weights
+    # Strategy 2: Read config.json + extract model.weights.h5 from zip -> model_from_json -> dummy forward -> load_weights
     e2 = None
     try:
+        import tempfile
         with zipfile.ZipFile(model_path, "r") as zf:
             config_json = zf.read("config.json").decode("utf-8")
+            h5_bytes = zf.read("model.weights.h5")
+
+        temp_h5_path = Path(tempfile.gettempdir()) / "temp_grade_model_weights.h5"
+        temp_h5_path.write_bytes(h5_bytes)
 
         with tf.keras.utils.custom_object_scope(custom_objs):
             full_model = tf.keras.models.model_from_json(config_json)
@@ -244,18 +249,21 @@ def load_keras_grade_model(
 
         dummy_zip = tf.zeros((1, h, w, 3), dtype=tf.float32)
         _ = full_model(dummy_zip, training=False)
-        full_model.load_weights(model_path)
-        print(f"[v] Loaded model via config-from-zip fallback! (Input resolution: {h}x{w})")
+        full_model.load_weights(str(temp_h5_path))
+        print(f"[v] Loaded model via config-from-zip + HDF5 weights fallback! (Input resolution: {h}x{w})")
         return full_model
     except Exception as err:
         e2 = err
 
-    # Strategy 3: Local architecture build + load_weights
+    # Strategy 3: Local architecture build + load_weights from extracted HDF5
     e3 = None
     try:
         local_model = build_coral_efficientnet_b3(input_shape=input_shape)
         _ = local_model(dummy, training=False)
-        local_model.load_weights(model_path)
+        if 'temp_h5_path' in locals() and temp_h5_path.exists():
+            local_model.load_weights(str(temp_h5_path))
+        else:
+            local_model.load_weights(model_path)
         print("[v] Loaded weights into local CORAL model architecture!")
         return local_model
     except Exception as err:
