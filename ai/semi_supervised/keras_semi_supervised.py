@@ -114,20 +114,26 @@ class PreprocessInputLayer(tf.keras.layers.Layer):
 
 @tf.keras.utils.register_keras_serializable(package="Custom", name="GeMPoolingLayer")
 class GeMPoolingLayer(tf.keras.layers.Layer):
-    """Custom Generalized Mean Pooling (GeM) layer present in teacher's model checkpoint."""
+    """Custom Generalized Mean Pooling (GeM) layer present in teacher's model checkpoint.
+
+    NOTE: weight 'p' is created in __init__ (not build) because it is shape-independent.
+    This ensures the variable exists immediately after deserialization, before any
+    forward pass triggers build(), allowing load_weights() to find 'p' by name.
+    """
     def __init__(self, p: float = 3.0, eps: float = 1e-6, **kwargs):
         super().__init__(**kwargs)
         self.p_init = float(p)
         self.eps = float(eps)
-
-    def build(self, input_shape):
+        # Create weight here so Keras load_weights can always find it by name
         self.p = self.add_weight(
             name="p",
             shape=(1,),
             initializer=tf.keras.initializers.Constant(self.p_init),
             trainable=True,
-            dtype=self.dtype,
         )
+
+    def build(self, input_shape):
+        # Weight already created in __init__; just mark as built.
         super().build(input_shape)
 
     def call(self, inputs, training=None):
@@ -149,93 +155,104 @@ def load_keras_grade_model(
     num_classes: int = 5,
 ) -> tf.keras.Model:
     """
-    Build EfficientNetB3 architecture and load weights from .keras or .h5 checkpoint.
-    Robust loader trying direct load_model first (with registered CutOutLayer, PreprocessInputLayer, GeMPoolingLayer).
+    Load EfficientNetB3 grade model from .keras checkpoint.
+
+    Tries the following strategies in order:
+      1. tf.keras.models.load_model with registered custom layers.
+      2. Manual GeMPoolingLayer-based architecture, auto-detecting num_classes (4 then 5).
+      3. GlobalAveragePooling2D architecture, auto-detecting num_classes (4 then 5).
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
 
     print(f"[*] Loading Keras Grade Model from: {model_path}")
 
-    e_direct = None
-    e1 = None
-    e2 = None
-    e3 = None
+    custom_objs = {
+        "CutOutLayer": CutOutLayer,
+        "PreprocessInputLayer": PreprocessInputLayer,
+        "GeMPoolingLayer": GeMPoolingLayer,
+    }
 
-    # Strategy 1: Direct Keras model load with registered Custom Layers (CutOutLayer, PreprocessInputLayer, GeMPoolingLayer)
+    # ── Strategy 1: tf.keras.models.load_model ──────────────────────────────────
+    e_direct = None
     try:
-        model = tf.keras.models.load_model(
-            model_path,
-            custom_objects={
-                "CutOutLayer": CutOutLayer,
-                "PreprocessInputLayer": PreprocessInputLayer,
-                "GeMPoolingLayer": GeMPoolingLayer,
-            },
-            compile=False,
-        )
-        print("[v] Keras Grade Model loaded successfully via tf.keras.models.load_model (with registered Custom Layers)!")
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objs, compile=False)
+        print("[v] Loaded via tf.keras.models.load_model!")
         return model
     except Exception as err:
         e_direct = err
-        print(f"[!] Direct load_model failed ({e_direct}). Attempting custom architecture reconstruction...")
+        print(f"[!] Direct load_model failed ({type(err).__name__}: {err}). Trying manual reconstruction...")
 
-    # Strategy 2: Single GlobalAveragePooling2D (1536 channels)
-    try:
-        model = build_efficientnet_b3(
-            input_shape=input_shape,
-            num_classes=num_classes,
-            weights=None,
-            training_base=True,
-            include_augmentation=True,
-            use_dual_pooling=False,
-        )
-        model.load_weights(model_path)
-        print("[v] Keras Grade Model loaded successfully (Single Pooling - 1536 channels)!")
-        return model
-    except Exception as err:
-        e1 = err
-        print(f"[!] Single pooling load failed ({err}). Trying Dual Pooling (3072 channels)...")
+    # ── Strategy 2: Manual GeM architecture, try num_classes 4 then 5 ───────────
+    # The teacher's checkpoint has 4 output classes (DR grade 0-3).
+    # We auto-detect by trying 4 first, then falling back to 5.
+    def _build_gem_model(n_cls: int) -> tf.keras.Model:
+        """Build EfficientNetB3 + GeM + BN + Dense(256) x2 + Dense(n_cls) matching teacher's head."""
+        from tensorflow.keras.applications import EfficientNetB3 as _EB3
+        inputs = tf.keras.Input(shape=input_shape)
+        # Skip augmentation / preprocessing wrappers – load raw pixel values
+        base = _EB3(weights=None, include_top=False, input_tensor=inputs)
+        x = GeMPoolingLayer(p=3.0, name="gem_pooling")(base.output)
+        x = tf.keras.layers.BatchNormalization(name="batch_normalization")(x)
+        x = tf.keras.layers.Dense(256, activation="relu", name="head_dense1")(x)
+        x = tf.keras.layers.Dropout(0.5)(x)
+        x = tf.keras.layers.Dense(256, activation="relu", name="head_dense2")(x)
+        x = tf.keras.layers.Dropout(0.5)(x)
+        out = tf.keras.layers.Dense(n_cls, activation="softmax", name="predictions")(x)
+        return tf.keras.Model(inputs=inputs, outputs=out)
 
-    # Strategy 3: Dual Pooling (3072 channels)
-    try:
-        model = build_efficientnet_b3(
-            input_shape=input_shape,
-            num_classes=num_classes,
-            weights=None,
-            training_base=True,
-            include_augmentation=True,
-            use_dual_pooling=True,
-        )
-        model.load_weights(model_path)
-        print("[v] Keras Grade Model loaded successfully (Dual Pooling - 3072 channels)!")
-        return model
-    except Exception as err:
-        e2 = err
-        print(f"[!] Dual pooling load failed ({err}). Trying Simple Sequential fallback...")
+    e_gem4, e_gem5 = None, None
+    for n_cls, e_slot in [(4, "e_gem4"), (5, "e_gem5")]:
+        try:
+            model = _build_gem_model(n_cls)
+            model.load_weights(model_path, by_name=True, skip_mismatch=False)
+            print(f"[v] Loaded via GeM architecture with num_classes={n_cls}!")
+            return model
+        except Exception as err:
+            if n_cls == 4:
+                e_gem4 = err
+            else:
+                e_gem5 = err
+            print(f"[!] GeM/{n_cls}-class load failed ({type(err).__name__}: {err}).")
 
-    # Strategy 4: Simple Sequential (Base -> GAP -> Dense 256 -> Dense 5)
-    try:
-        from tensorflow.keras import layers, models
-        from tensorflow.keras.applications import EfficientNetB3
+    # ── Strategy 3: GAP architecture, try num_classes 4 then 5 ──────────────────
+    def _build_gap_model(n_cls: int) -> tf.keras.Model:
+        """Fallback: EfficientNetB3 + GlobalAveragePooling2D + Dense(256) + Dense(n_cls)."""
+        from tensorflow.keras.applications import EfficientNetB3 as _EB3
+        inputs = tf.keras.Input(shape=input_shape)
+        base = _EB3(weights=None, include_top=False, input_tensor=inputs)
+        x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dense(256, activation="relu")(x)
+        x = tf.keras.layers.Dropout(0.5)(x)
+        x = tf.keras.layers.Dense(256, activation="relu")(x)
+        x = tf.keras.layers.Dropout(0.5)(x)
+        out = tf.keras.layers.Dense(n_cls, activation="softmax", name="predictions")(x)
+        return tf.keras.Model(inputs=inputs, outputs=out)
 
-        base_model = EfficientNetB3(weights=None, include_top=False, input_shape=input_shape)
-        model = models.Sequential([
-            base_model,
-            layers.GlobalAveragePooling2D(),
-            layers.Dropout(0.2),
-            layers.Dense(256, activation="relu"),
-            layers.Dropout(0.2),
-            layers.Dense(num_classes, activation="softmax"),
-        ])
-        model.load_weights(model_path)
-        print("[v] Keras Grade Model loaded successfully (Simple Sequential Dense 256)!")
-        return model
-    except Exception as err:
-        e3 = err
-        raise ValueError(
-            f"Could not load model checkpoint from {model_path}.\n"
-            f"Errors:\n  - direct_load={e_direct}\n  - single_pool={e1}\n  - dual_pool={e2}\n  - sequential={e3}"
-        )
+    e_gap4, e_gap5 = None, None
+    for n_cls, e_slot in [(4, "e_gap4"), (5, "e_gap5")]:
+        try:
+            model = _build_gap_model(n_cls)
+            model.load_weights(model_path, by_name=True, skip_mismatch=False)
+            print(f"[v] Loaded via GAP architecture with num_classes={n_cls}!")
+            return model
+        except Exception as err:
+            if n_cls == 4:
+                e_gap4 = err
+            else:
+                e_gap5 = err
+            print(f"[!] GAP/{n_cls}-class load failed ({type(err).__name__}: {err}).")
+
+    raise ValueError(
+        f"Could not load model checkpoint from {model_path}.\n"
+        f"Errors:\n"
+        f"  - direct_load : {e_direct}\n"
+        f"  - gem/4-class : {e_gem4}\n"
+        f"  - gem/5-class : {e_gem5}\n"
+        f"  - gap/4-class : {e_gap4}\n"
+        f"  - gap/5-class : {e_gap5}"
+    )
 
 
 def discover_unlabeled_images(unlabeled_dir: Path) -> List[Path]:
