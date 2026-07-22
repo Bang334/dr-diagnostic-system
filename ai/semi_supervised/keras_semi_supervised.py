@@ -68,9 +68,9 @@ def build_efficientnet_b3(
         x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
 
     x = layers.BatchNormalization()(x)
-    x = layers.Dense(512, activation='relu', name="head_dense1")(x)
+    x = layers.Dense(256, activation='relu', name="head_dense1")(x)
     x = layers.Dropout(0.5)(x)
-    x = layers.Dense(128, activation='relu', name="head_dense2")(x)
+    x = layers.Dense(256, activation='relu', name="head_dense2")(x)
     x = layers.Dropout(0.3)(x)
 
     outputs = layers.Dense(num_classes, activation='softmax', dtype='float32', name="predictions")(x)
@@ -95,6 +95,23 @@ class CutOutLayer(tf.keras.layers.Layer):
         return config
 
 
+@tf.keras.utils.register_keras_serializable(package="Custom", name="PreprocessInputLayer")
+class PreprocessInputLayer(tf.keras.layers.Layer):
+    """Custom PreprocessInputLayer present in teacher's model checkpoint."""
+    def __init__(self, model_name: str = "EfficientNetB3", **kwargs):
+        super().__init__(**kwargs)
+        self.model_name = model_name
+
+    def call(self, inputs, training=None):
+        from tensorflow.keras.applications.efficientnet import preprocess_input
+        return preprocess_input(inputs)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"model_name": self.model_name})
+        return config
+
+
 def load_keras_grade_model(
     model_path: str,
     input_shape: Tuple[int, int, int] = (300, 300, 3),
@@ -102,7 +119,7 @@ def load_keras_grade_model(
 ) -> tf.keras.Model:
     """
     Build EfficientNetB3 architecture and load weights from .keras or .h5 checkpoint.
-    Robust loader trying direct load_model first (with registered CutOutLayer), followed by custom fallbacks.
+    Robust loader trying direct load_model first (with registered CutOutLayer & PreprocessInputLayer), followed by custom fallbacks.
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
@@ -114,14 +131,17 @@ def load_keras_grade_model(
     e2 = None
     e3 = None
 
-    # Strategy 1: Direct Keras model load with registered CutOutLayer
+    # Strategy 1: Direct Keras model load with registered CutOutLayer & PreprocessInputLayer
     try:
         model = tf.keras.models.load_model(
             model_path,
-            custom_objects={"CutOutLayer": CutOutLayer},
+            custom_objects={
+                "CutOutLayer": CutOutLayer,
+                "PreprocessInputLayer": PreprocessInputLayer,
+            },
             compile=False,
         )
-        print("[v] Keras Grade Model loaded successfully via tf.keras.models.load_model (with CutOutLayer)!")
+        print("[v] Keras Grade Model loaded successfully via tf.keras.models.load_model (with registered Custom Layers)!")
         return model
     except Exception as err:
         e_direct = err
@@ -142,7 +162,7 @@ def load_keras_grade_model(
         return model
     except Exception as err:
         e1 = err
-        print(f"[!] Single pooling load failed. Trying Dual Pooling (3072 channels)...")
+        print(f"[!] Single pooling load failed ({err}). Trying Dual Pooling (3072 channels)...")
 
     # Strategy 3: Dual Pooling (3072 channels)
     try:
@@ -159,7 +179,7 @@ def load_keras_grade_model(
         return model
     except Exception as err:
         e2 = err
-        print(f"[!] Dual pooling load failed. Trying Simple Sequential fallback...")
+        print(f"[!] Dual pooling load failed ({err}). Trying Simple Sequential fallback...")
 
     # Strategy 4: Simple Sequential (Base -> GAP -> Dense 256 -> Dense 5)
     try:
