@@ -119,17 +119,14 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.p_init = float(p)
         self.eps = float(eps)
-
-    def build(self, input_shape):
-        # Standard Keras pattern: create weight in build() so it is always
-        # properly tracked. Strategy 2 in the loader guarantees build() is
-        # triggered via a dummy forward pass BEFORE load_weights runs.
         self.p = self.add_weight(
             name="p",
             shape=(1,),
             initializer=tf.keras.initializers.Constant(self.p_init),
             trainable=True,
         )
+
+    def build(self, input_shape):
         super().build(input_shape)
 
     def call(self, inputs, training=None):
@@ -142,6 +139,25 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
     def get_config(self):
         config = super().get_config()
         config.update({"p": self.p_init, "eps": self.eps})
+        return config
+
+
+@tf.keras.utils.register_keras_serializable(package="Custom", name="CohenKappaMetric")
+class CohenKappaMetric(tf.keras.metrics.Metric):
+    """Custom Cohen Kappa Metric present in teacher's model checkpoint."""
+    def __init__(self, name="kappa", num_classes=5, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.num_classes = num_classes
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        pass
+
+    def result(self):
+        return tf.constant(0.0)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"num_classes": self.num_classes})
         return config
 
 
@@ -195,6 +211,7 @@ def load_keras_grade_model(
         "PreprocessInputLayer": PreprocessInputLayer,
         "GeMPoolingLayer": GeMPoolingLayer,
         "ordinal_loss": ordinal_loss,
+        "CohenKappaMetric": CohenKappaMetric,
     }
 
     dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
