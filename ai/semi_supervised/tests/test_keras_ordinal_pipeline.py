@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -15,6 +17,7 @@ from ai.keras_grading.ordinal import (
     ordinal_to_class_probabilities,
     validate_thresholds,
 )
+from ai.keras_grading.evaluate import evaluate_samples
 from ai.preprocessing.fundus_prep import preprocess_rgb_crop_512_from_bgr
 from ai.semi_supervised.keras_pseudo_labels import (
     ordinal_decision_confidence,
@@ -156,6 +159,38 @@ class KerasSemiSupervisedSafetyTests(unittest.TestCase):
             self.assertIsNone(
                 read_matching_pseudo_cache(cache_path, pseudo_path, changed)
             )
+
+
+class BaselineProgressLoggingTests(unittest.TestCase):
+    def test_logs_immediate_progress_eta_and_running_accuracy(self):
+        class FakeModel:
+            input_shape = (None, 384, 384, 3)
+            output_shape = (None, 4)
+
+        class FakeGrader:
+            model = FakeModel()
+            load_mode = "fake"
+            use_tta = True
+            thresholds = DEFAULT_ORDINAL_THRESHOLDS
+
+            @staticmethod
+            def predict_path(path):
+                return decode_ordinal([0.9, 0.8, 0.2, 0.1])
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            metrics, _ = evaluate_samples(
+                FakeGrader(),
+                [(Path("one.jpg"), 2), (Path("two.jpg"), 1)],
+                progress_every=1,
+            )
+        log = output.getvalue()
+        self.assertIn("BASELINE VALIDATION STARTED", log)
+        self.assertIn("[baseline] 1/2", log)
+        self.assertIn("ETA=", log)
+        self.assertIn("running_accuracy=", log)
+        self.assertIn("BASELINE COMPLETED", log)
+        self.assertEqual(metrics["accuracy"], 0.5)
 
 
 if __name__ == "__main__":

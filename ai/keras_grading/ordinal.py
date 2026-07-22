@@ -36,9 +36,7 @@ class OrdinalPrediction:
             "confidence": round(self.confidence, 4),
             "probabilities": {
                 name: round(float(probability), 4)
-                for name, probability in zip(
-                    CLASS_NAMES, self.class_probabilities, strict=True
-                )
+                for name, probability in zip(CLASS_NAMES, self.class_probabilities)
             },
             "ordinal_probabilities": [
                 round(float(value), 4) for value in self.ordinal_probabilities
