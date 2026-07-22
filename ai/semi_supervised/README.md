@@ -6,6 +6,37 @@ mới và không được đưa thẳng vào inference lâm sàng.
 
 Notebook Colab: `Semi_Supervised_Few_Shot_Colab.ipynb`.
 
+## Keras EfficientNetB3 ordinal teacher
+
+The supplied `best_EfficientNetB3_rgb_crop_v1.keras` checkpoint uses four
+CORAL boundaries for five DR grades. This path is kept separate from the
+existing RETFound/PyTorch experiments.
+
+```bash
+pip install -r ai/semi_supervised/requirements-keras.txt
+
+python -m ai.keras_grading.evaluate \
+  --model /path/to/best_EfficientNetB3_rgb_crop_v1.keras \
+  --split-dir /path/to/split_dataset/validation \
+  --output-dir /path/to/runs/teacher-validation
+
+python -m ai.semi_supervised.keras_semi_supervised \
+  --model /path/to/best_EfficientNetB3_rgb_crop_v1.keras \
+  --dataset-dir /path/to/split_dataset \
+  --unlabeled-dir /path/to/external-unlabeled \
+  --output-dir /path/to/runs/keras-semi-v1 \
+  --pseudo-confidence 0.50 \
+  --pseudo-weight 0.25
+```
+
+The default calibrated thresholds are `[0.55, 0.50, 0.435, 0.31]`. Training
+uses only the fixed train and validation splits; test evaluation remains a
+separate explicit command after model selection.
+
+Training streams batch loss/accuracy/QWK/MAE and prints a train-versus-validation
+summary after every epoch. Persistent logs are written to `history.csv`,
+`epoch-log.json`, and `tensorboard/` inside the run directory on Drive.
+
 ## Dữ liệu được phép sử dụng
 
 Dataset có nhãn phải giữ nguyên cấu trúc split:

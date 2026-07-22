@@ -19,6 +19,11 @@ import numpy as np
 from tqdm import tqdm
 
 
+BLACK_THRESHOLD = 10
+CROP_MARGIN_RATIO = 0.03
+MIN_FUNDUS_AREA_RATIO = 0.20
+
+
 def crop_image_from_gray(image: np.ndarray, tol: int = 7) -> np.ndarray:
     """Remove the black camera border while preserving every colour channel."""
     if image is None or image.size == 0:
@@ -38,6 +43,63 @@ def crop_image_from_gray(image: np.ndarray, tol: int = 7) -> np.ndarray:
     rows = np.flatnonzero(mask.any(axis=1))
     cols = np.flatnonzero(mask.any(axis=0))
     return image[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1].copy()
+
+
+def crop_fundus_rgb(image_rgb: np.ndarray) -> np.ndarray:
+    """Crop the retinal field using the contour logic used by rgb_crop_512."""
+    if image_rgb is None or image_rgb.size == 0:
+        raise ValueError("Fundus image is empty")
+    if image_rgb.ndim != 3 or image_rgb.shape[2] != 3:
+        raise ValueError(f"Expected HxWx3 RGB image, received {image_rgb.shape}")
+
+    height, width = image_rgb.shape[:2]
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    _, mask = cv2.threshold(gray, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return image_rgb.copy()
+
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) < MIN_FUNDUS_AREA_RATIO * height * width:
+        return image_rgb.copy()
+
+    x, y, crop_width, crop_height = cv2.boundingRect(contour)
+    margin = int(round(max(crop_width, crop_height) * CROP_MARGIN_RATIO))
+    return image_rgb[
+        max(0, y - margin) : min(height, y + crop_height + margin),
+        max(0, x - margin) : min(width, x + crop_width + margin),
+    ].copy()
+
+
+def resize_with_padding_rgb(
+    image_rgb: np.ndarray, target_size: int = 512
+) -> np.ndarray:
+    """Resize an RGB image without distortion and pad it to a square."""
+    height, width = image_rgb.shape[:2]
+    if height == 0 or width == 0:
+        raise ValueError("Fundus crop is empty")
+    scale = min(target_size / width, target_size / height)
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+    resized = cv2.resize(
+        image_rgb, (new_width, new_height), interpolation=cv2.INTER_AREA
+    )
+    canvas = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+    left = (target_size - new_width) // 2
+    top = (target_size - new_height) // 2
+    canvas[top : top + new_height, left : left + new_width] = resized
+    return canvas
+
+
+def preprocess_rgb_crop_512_from_bgr(image_bgr: np.ndarray) -> np.ndarray:
+    """Reproduce the teacher model's colour-preserving rgb_crop_512 input."""
+    if image_bgr is None or image_bgr.size == 0:
+        raise ValueError("Fundus image is empty")
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    return resize_with_padding_rgb(crop_fundus_rgb(image_rgb), 512)
 
 
 def ben_graham_enhance(image_bgr: np.ndarray, sigma: float = 10.0) -> np.ndarray:
