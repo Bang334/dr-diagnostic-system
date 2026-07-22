@@ -235,9 +235,17 @@ def load_keras_grade_model(
         with tf.keras.utils.custom_object_scope(custom_objs):
             full_model = tf.keras.models.model_from_json(config_json)
 
-        _ = full_model(dummy, training=False)
+        # Detect expected input shape dynamically from reconstructed model
+        in_shape = full_model.input_shape
+        if isinstance(in_shape, list):
+            in_shape = in_shape[0]
+        h = in_shape[1] if (len(in_shape) > 1 and in_shape[1] is not None) else input_shape[0]
+        w = in_shape[2] if (len(in_shape) > 2 and in_shape[2] is not None) else input_shape[1]
+
+        dummy_zip = tf.zeros((1, h, w, 3), dtype=tf.float32)
+        _ = full_model(dummy_zip, training=False)
         full_model.load_weights(model_path)
-        print("[v] Loaded model via config-from-zip fallback!")
+        print(f"[v] Loaded model via config-from-zip fallback! (Input resolution: {h}x{w})")
         return full_model
     except Exception as err:
         e2 = err
@@ -436,6 +444,13 @@ def train_keras_semi_supervised(
 
     # 1. Load Model
     model = load_keras_grade_model(model_path, input_shape=(*input_size, 3))
+    m_shape = model.input_shape
+    if isinstance(m_shape, list):
+        m_shape = m_shape[0]
+    if len(m_shape) >= 3 and m_shape[1] is not None and m_shape[2] is not None:
+        input_size = (int(m_shape[1]), int(m_shape[2]))
+        print(f"[*] Auto-adjusted input_size to model's native resolution: {input_size}")
+
     num_outputs = int(model.output_shape[-1])
     is_coral = (num_outputs == 4)
     print(f"[*] Detected model output neurons: {num_outputs} ({'CORAL Ordinal Regression (5 DR grades)' if is_coral else 'Standard Softmax'})")
