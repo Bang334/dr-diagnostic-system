@@ -192,7 +192,7 @@ def build_coral_efficientnet_b3(input_shape: Tuple[int, int, int] = (300, 300, 3
     return model
 
 
-def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes) -> int:
+def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes, verbose: bool = True) -> int:
     """
     Directly assign weights from model.weights.h5 (Keras 3 internal format).
 
@@ -200,6 +200,7 @@ def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes) -> int:
     instance name. For example, GeMPoolingLayer is stored under 'ge_m_pooling_layer',
     and multiple Dense layers become 'dense', 'dense_1', 'dense_2', etc.
     This function recursively traverses the h5 tree and assigns each variable.
+    Falls back to shape-based matching for any variables missed by tree traversal.
     """
     import h5py
     import io
@@ -214,41 +215,91 @@ def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes) -> int:
         name = re.sub(r"([a-z])([A-Z])", r"\1_\2", name)
         return name.lower()
 
-    assigned_count = [0]
+    assigned_var_ids: set = set()
+    used_dataset_paths: set = set()
+    all_datasets: dict = {}   # path -> numpy array (collected during traversal)
 
-    def assign_from_group(h5_group, layers):
+    def assign_from_group(h5_group, layers, depth: int = 0, group_path: str = "layers"):
         cls_counter: dict = defaultdict(int)
         for layer in layers:
             cls = to_snake(type(layer).__name__)
             idx = cls_counter[cls]
             cls_counter[cls] += 1
             key = cls if idx == 0 else f"{cls}_{idx}"
+            full_path = f"{group_path}/{key}"
 
             if key not in h5_group:
+                # Only warn if the layer has trainable variables (no-var layers are expected to be absent)
+                if verbose and len(layer.variables) > 0:
+                    print(f"  [?] h5 key not found: '{full_path}' (layer {layer.name}, cls={cls}, vars={len(layer.variables)})")
                 continue
             grp = h5_group[key]
 
             # Assign this layer's own variables
             if "vars" in grp:
                 for i, var in enumerate(layer.variables):
-                    var_path = str(i)
-                    if var_path in grp["vars"]:
-                        data = grp["vars"][var_path][()]
+                    var_path_h5 = str(i)
+                    dataset_path = f"{full_path}/vars/{var_path_h5}"
+                    if var_path_h5 in grp["vars"]:
+                        data = grp["vars"][var_path_h5][()]
+                        all_datasets[dataset_path] = data
+                        used_dataset_paths.add(dataset_path)
                         try:
                             var.assign(tf.cast(data, var.dtype))
-                            assigned_count[0] += 1
+                            assigned_var_ids.add(id(var))
                         except Exception:
                             pass
 
             # Recurse into sub-models (e.g., EfficientNetB3 backbone)
             if hasattr(layer, "layers") and len(layer.layers) > 0 and "layers" in grp:
-                assign_from_group(grp["layers"], layer.layers)
+                assign_from_group(grp["layers"], layer.layers, depth + 1, f"{full_path}/layers")
 
+    # ── Pass 1: tree traversal by class-name-snake-case ──────────────────────
     with h5py.File(io.BytesIO(h5_bytes), "r") as h5f:
         if "layers" in h5f:
+            # Pre-collect all datasets from h5 for the fallback pass
+            def _collect_all(name, obj):
+                if isinstance(obj, h5py.Dataset) and not name.startswith("optimizer"):
+                    all_datasets[name] = obj[()]
+            h5f.visititems(_collect_all)
+
             assign_from_group(h5f["layers"], model.layers)
 
-    return assigned_count[0]
+    pass1_count = len(assigned_var_ids)
+    total_vars = len(model.variables)
+    if verbose:
+        print(f"  [Pass 1] {pass1_count}/{total_vars} variables assigned via tree traversal.")
+
+    # ── Pass 2: shape-based fallback for remaining variables ─────────────────
+    unassigned_vars = [v for v in model.variables if id(v) not in assigned_var_ids]
+    remaining_datasets = {p: d for p, d in all_datasets.items() if p not in used_dataset_paths}
+
+    if unassigned_vars and remaining_datasets:
+        if verbose:
+            print(f"  [Pass 2] Trying shape-based fallback for {len(unassigned_vars)} unassigned vars...")
+        # Sort datasets by path for deterministic matching
+        sorted_remaining = sorted(remaining_datasets.items())
+        for var in unassigned_vars:
+            target_shape = tuple(var.shape)
+            for path, arr in sorted_remaining:
+                if path not in used_dataset_paths and tuple(arr.shape) == target_shape:
+                    try:
+                        var.assign(tf.cast(arr, var.dtype))
+                        assigned_var_ids.add(id(var))
+                        used_dataset_paths.add(path)
+                        if verbose:
+                            print(f"    [+] Matched by shape {target_shape}: {var.name} <- {path}")
+                    except Exception:
+                        pass
+                    break
+
+    total_assigned = len(assigned_var_ids)
+    if verbose and total_assigned < total_vars:
+        still_missing = [v for v in model.variables if id(v) not in assigned_var_ids]
+        print(f"  [!] Still unassigned after both passes:")
+        for v in still_missing:
+            print(f"      - {v.name}  shape={tuple(v.shape)}  dtype={v.dtype.name}")
+    return total_assigned
 
 
 def load_keras_grade_model(
