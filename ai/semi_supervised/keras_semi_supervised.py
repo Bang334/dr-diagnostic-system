@@ -112,6 +112,37 @@ class PreprocessInputLayer(tf.keras.layers.Layer):
         return config
 
 
+@tf.keras.utils.register_keras_serializable(package="Custom", name="GeMPoolingLayer")
+class GeMPoolingLayer(tf.keras.layers.Layer):
+    """Custom Generalized Mean Pooling (GeM) layer present in teacher's model checkpoint."""
+    def __init__(self, p: float = 3.0, eps: float = 1e-6, **kwargs):
+        super().__init__(**kwargs)
+        self.p = float(p)
+        self.eps = float(eps)
+
+    def build(self, input_shape):
+        self.p_param = self.add_weight(
+            name="p",
+            shape=(1,),
+            initializer=tf.keras.initializers.Constant(self.p),
+            trainable=True,
+            dtype=self.dtype,
+        )
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        x = tf.clip_by_value(inputs, self.eps, tf.float32.max)
+        x = tf.pow(x, self.p_param)
+        x = tf.reduce_mean(x, axis=[1, 2], keepdims=False)
+        x = tf.pow(x, 1.0 / self.p_param)
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"p": self.p, "eps": self.eps})
+        return config
+
+
 def load_keras_grade_model(
     model_path: str,
     input_shape: Tuple[int, int, int] = (300, 300, 3),
@@ -119,7 +150,7 @@ def load_keras_grade_model(
 ) -> tf.keras.Model:
     """
     Build EfficientNetB3 architecture and load weights from .keras or .h5 checkpoint.
-    Robust loader trying direct load_model first (with registered CutOutLayer & PreprocessInputLayer), followed by custom fallbacks.
+    Robust loader trying direct load_model first (with registered CutOutLayer, PreprocessInputLayer, GeMPoolingLayer).
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
@@ -131,13 +162,14 @@ def load_keras_grade_model(
     e2 = None
     e3 = None
 
-    # Strategy 1: Direct Keras model load with registered CutOutLayer & PreprocessInputLayer
+    # Strategy 1: Direct Keras model load with registered Custom Layers (CutOutLayer, PreprocessInputLayer, GeMPoolingLayer)
     try:
         model = tf.keras.models.load_model(
             model_path,
             custom_objects={
                 "CutOutLayer": CutOutLayer,
                 "PreprocessInputLayer": PreprocessInputLayer,
+                "GeMPoolingLayer": GeMPoolingLayer,
             },
             compile=False,
         )
