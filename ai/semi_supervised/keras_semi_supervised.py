@@ -599,7 +599,7 @@ def train_keras_semi_supervised(
 
     if is_coral:
         loss_fn = nan_safe_binary_crossentropy
-        metrics_list = ["binary_accuracy", "mae"]
+        metrics_list = ["binary_accuracy"]
     else:
         loss_fn = "categorical_crossentropy"
         metrics_list = ["accuracy"]
