@@ -117,14 +117,14 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
     """Custom Generalized Mean Pooling (GeM) layer present in teacher's model checkpoint."""
     def __init__(self, p: float = 3.0, eps: float = 1e-6, **kwargs):
         super().__init__(**kwargs)
-        self.p = float(p)
+        self.p_init = float(p)
         self.eps = float(eps)
 
     def build(self, input_shape):
-        self.p_param = self.add_weight(
+        self.p = self.add_weight(
             name="p",
             shape=(1,),
-            initializer=tf.keras.initializers.Constant(self.p),
+            initializer=tf.keras.initializers.Constant(self.p_init),
             trainable=True,
             dtype=self.dtype,
         )
@@ -132,14 +132,14 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
 
     def call(self, inputs, training=None):
         x = tf.clip_by_value(inputs, self.eps, tf.float32.max)
-        x = tf.pow(x, self.p_param)
+        x = tf.pow(x, self.p)
         x = tf.reduce_mean(x, axis=[1, 2], keepdims=False)
-        x = tf.pow(x, 1.0 / self.p_param)
+        x = tf.pow(x, 1.0 / self.p)
         return x
 
     def get_config(self):
         config = super().get_config()
-        config.update({"p": self.p, "eps": self.eps})
+        config.update({"p": self.p_init, "eps": self.eps})
         return config
 
 
@@ -324,7 +324,8 @@ def create_semi_tf_dataset(
     input_size: Tuple[int, int] = (300, 300),
     pseudo_weight: float = 0.25,
     is_training: bool = True,
-) -> tf.data.Dataset:
+    num_classes: int = 5,
+) -> Tuple[tf.data.Dataset, int]:
     """
     Create a combined tf.data.Dataset with labeled data (weight 1.0) and pseudo-labeled data (weight pseudo_weight * confidence).
     """
@@ -355,7 +356,7 @@ def create_semi_tf_dataset(
         img = tf.image.decode_image(img_raw, channels=3, expand_animations=False)
         img = tf.image.resize(img, input_size)
         img = tf.cast(img, tf.float32)
-        one_hot_label = tf.one_hot(label, depth=5)
+        one_hot_label = tf.one_hot(label, depth=num_classes)
         return img, one_hot_label, weight
 
     ds = tf.data.Dataset.from_tensor_slices((paths_tensor, labels_tensor, weights_tensor))
@@ -388,6 +389,8 @@ def train_keras_semi_supervised(
 
     # 1. Load Model
     model = load_keras_grade_model(model_path, input_shape=(*input_size, 3))
+    num_classes = int(model.output_shape[-1])
+    print(f"[*] Detected model output classes: {num_classes}")
 
     # 2. Discover Unlabeled Images & Generate Pseudo-labels
     unlabeled_images = discover_unlabeled_images(Path(unlabeled_dir))
@@ -413,6 +416,7 @@ def train_keras_semi_supervised(
         input_size=input_size,
         pseudo_weight=pseudo_weight,
         is_training=True,
+        num_classes=num_classes,
     )
 
     # 5. Compile Model
