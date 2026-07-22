@@ -227,6 +227,7 @@ def generate_pseudo_labels_keras(
 ) -> pd.DataFrame:
     """
     Run batch inference on unlabeled images and collect pseudo-labels passing threshold.
+    Supports both CORAL Ordinal Regression (4 output sigmoid neurons, 5 DR classes) and standard Softmax.
     """
     print(f"[*] Generating pseudo-labels for {len(image_paths):,} images (threshold={threshold})...")
     records = []
@@ -252,8 +253,23 @@ def generate_pseudo_labels_keras(
 
     for batch_imgs, batch_paths in dataset:
         preds = model.predict(batch_imgs, verbose=0)
-        confidences = np.max(preds, axis=1)
-        labels = np.argmax(preds, axis=1)
+        
+        # Check output type: CORAL Ordinal Regression (4 outputs) vs Standard Softmax
+        if preds.shape[-1] == 4:
+            # CORAL Ordinal Regression: 4 sigmoid outputs [DR>0, DR>1, DR>2, DR>3]
+            # Grade class k in {0, 1, 2, 3, 4} = count of sigmoid probabilities >= 0.5
+            labels = np.sum(preds >= 0.5, axis=1)
+
+            confidences = []
+            for p, k in zip(preds, labels):
+                # Expected target for grade k is 1 for i < k else 0
+                target = np.array([1.0 if i < k else 0.0 for i in range(4)])
+                certainty = float(np.mean(np.where(target == 1.0, p, 1.0 - p)))
+                confidences.append(certainty)
+            confidences = np.array(confidences)
+        else:
+            confidences = np.max(preds, axis=1)
+            labels = np.argmax(preds, axis=1)
 
         for p_str, label, conf in zip(batch_paths.numpy(), labels, confidences):
             path_decoded = p_str.decode("utf-8") if isinstance(p_str, bytes) else str(p_str)
@@ -278,7 +294,7 @@ def generate_pseudo_labels_keras(
         frame = frame.groupby("pseudo_label", group_keys=False).head(max_per_class)
 
     frame = frame.sort_values(["pseudo_label", "confidence"], ascending=[True, False]).reset_index(drop=True)
-    print(f"[v] Accepted {len(frame):,} pseudo-labels across classes:")
+    print(f"[v] Accepted {len(frame):,} pseudo-labels across classes (0-4):")
     print(frame["pseudo_label"].value_counts().sort_index().to_dict())
     return frame
 
@@ -290,10 +306,12 @@ def create_semi_tf_dataset(
     input_size: Tuple[int, int] = (300, 300),
     pseudo_weight: float = 0.25,
     is_training: bool = True,
+    is_coral: bool = True,
     num_classes: int = 5,
 ) -> Tuple[tf.data.Dataset, int]:
     """
     Create a combined tf.data.Dataset with labeled data (weight 1.0) and pseudo-labeled data (weight pseudo_weight * confidence).
+    Supports CORAL Ordinal Regression (4 binary outputs for 5 DR grades).
     """
     paths = []
     labels = []
@@ -322,8 +340,13 @@ def create_semi_tf_dataset(
         img = tf.image.decode_image(img_raw, channels=3, expand_animations=False)
         img = tf.image.resize(img, input_size)
         img = tf.cast(img, tf.float32)
-        one_hot_label = tf.one_hot(label, depth=num_classes)
-        return img, one_hot_label, weight
+        if is_coral:
+            # CORAL label target: binary vector of length 4 for DR > 0, DR > 1, DR > 2, DR > 3
+            # Grade 0 -> [0,0,0,0], Grade 1 -> [1,0,0,0], Grade 2 -> [1,1,0,0], Grade 3 -> [1,1,1,0], Grade 4 -> [1,1,1,1]
+            target_label = tf.cast(tf.range(4) < label, tf.float32)
+        else:
+            target_label = tf.one_hot(label, depth=num_classes)
+        return img, target_label, weight
 
     ds = tf.data.Dataset.from_tensor_slices((paths_tensor, labels_tensor, weights_tensor))
     ds = ds.map(parse_sample, num_parallel_calls=tf.data.AUTOTUNE)
@@ -355,8 +378,9 @@ def train_keras_semi_supervised(
 
     # 1. Load Model
     model = load_keras_grade_model(model_path, input_shape=(*input_size, 3))
-    num_classes = int(model.output_shape[-1])
-    print(f"[*] Detected model output classes: {num_classes}")
+    num_outputs = int(model.output_shape[-1])
+    is_coral = (num_outputs == 4)
+    print(f"[*] Detected model output neurons: {num_outputs} ({'CORAL Ordinal Regression (5 DR grades)' if is_coral else 'Standard Softmax'})")
 
     # 2. Discover Unlabeled Images & Generate Pseudo-labels
     unlabeled_images = discover_unlabeled_images(Path(unlabeled_dir))
@@ -382,15 +406,23 @@ def train_keras_semi_supervised(
         input_size=input_size,
         pseudo_weight=pseudo_weight,
         is_training=True,
-        num_classes=num_classes,
+        is_coral=is_coral,
+        num_classes=5,
     )
 
     # 5. Compile Model
     optimizer = optimizers.Adam(learning_rate=lr)
+    if is_coral:
+        loss_fn = "binary_crossentropy"
+        metrics_list = ["binary_accuracy", "mae"]
+    else:
+        loss_fn = "categorical_crossentropy"
+        metrics_list = ["accuracy"]
+
     model.compile(
         optimizer=optimizer,
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
+        loss=loss_fn,
+        metrics=metrics_list,
     )
 
     # 6. Callbacks
