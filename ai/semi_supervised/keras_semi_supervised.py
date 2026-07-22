@@ -192,14 +192,74 @@ def build_coral_efficientnet_b3(input_shape: Tuple[int, int, int] = (300, 300, 3
     return model
 
 
+def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes) -> int:
+    """
+    Directly assign weights from model.weights.h5 (Keras 3 internal format).
+
+    Keras 3 saves weights keyed by the LAYER CLASS NAME in snake_case, not the layer
+    instance name. For example, GeMPoolingLayer is stored under 'ge_m_pooling_layer',
+    and multiple Dense layers become 'dense', 'dense_1', 'dense_2', etc.
+    This function recursively traverses the h5 tree and assigns each variable.
+    """
+    import h5py
+    import io
+    import re
+    from collections import defaultdict
+
+    def to_snake(name: str) -> str:
+        name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+        return re.sub(r"([a-z\d])([A-Z])", r"\1_\2", name).lower()
+
+    assigned_count = [0]
+
+    def assign_from_group(h5_group, layers):
+        cls_counter: dict = defaultdict(int)
+        for layer in layers:
+            cls = to_snake(type(layer).__name__)
+            idx = cls_counter[cls]
+            cls_counter[cls] += 1
+            key = cls if idx == 0 else f"{cls}_{idx}"
+
+            if key not in h5_group:
+                continue
+            grp = h5_group[key]
+
+            # Assign this layer's own variables
+            if "vars" in grp:
+                for i, var in enumerate(layer.variables):
+                    var_path = str(i)
+                    if var_path in grp["vars"]:
+                        data = grp["vars"][var_path][()]
+                        try:
+                            var.assign(tf.cast(data, var.dtype))
+                            assigned_count[0] += 1
+                        except Exception:
+                            pass
+
+            # Recurse into sub-models (e.g., EfficientNetB3 backbone)
+            if hasattr(layer, "layers") and len(layer.layers) > 0 and "layers" in grp:
+                assign_from_group(grp["layers"], layer.layers)
+
+    with h5py.File(io.BytesIO(h5_bytes), "r") as h5f:
+        if "layers" in h5f:
+            assign_from_group(h5f["layers"], model.layers)
+
+    return assigned_count[0]
+
+
 def load_keras_grade_model(
     model_path: str,
     input_shape: Tuple[int, int, int] = (300, 300, 3),
 ) -> tf.keras.Model:
     """
     Load teacher's CORAL EfficientNetB3 grade model from .keras checkpoint.
+
+    .keras is a ZIP containing config.json + model.weights.h5.
+    Keras 3 stores weights keyed by class-name-snake-case, not by instance name.
+    We use direct h5py traversal to assign weights, bypassing load_weights() mismatches.
     """
     import zipfile
+    import io
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
@@ -214,66 +274,56 @@ def load_keras_grade_model(
         "CohenKappaMetric": CohenKappaMetric,
     }
 
-    dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
+    # Extract config.json and model.weights.h5 from zip
+    with zipfile.ZipFile(model_path, "r") as zf:
+        config_json = zf.read("config.json").decode("utf-8")
+        h5_bytes = zf.read("model.weights.h5")
 
-    # Strategy 1: Direct tf.keras.models.load_model with registered custom objects & loss
+    # ── Strategy 1: model_from_json → dummy forward → h5py direct assignment ─────
     e1 = None
     try:
-        model = tf.keras.models.load_model(model_path, custom_objects=custom_objs, compile=False)
-        print("[v] Successfully loaded model via tf.keras.models.load_model!")
-        return model
-    except Exception as err:
-        e1 = err
-        print(f"[!] Direct load_model failed ({type(e1).__name__}: {e1}). Trying config-from-zip fallback...")
-
-    # Strategy 2: Read config.json + extract model.weights.h5 from zip -> model_from_json -> dummy forward -> load_weights
-    e2 = None
-    try:
-        import tempfile
-        with zipfile.ZipFile(model_path, "r") as zf:
-            config_json = zf.read("config.json").decode("utf-8")
-            h5_bytes = zf.read("model.weights.h5")
-
-        temp_h5_path = Path(tempfile.gettempdir()) / "temp_grade_model_weights.h5"
-        temp_h5_path.write_bytes(h5_bytes)
-
         with tf.keras.utils.custom_object_scope(custom_objs):
-            full_model = tf.keras.models.model_from_json(config_json)
+            model = tf.keras.models.model_from_json(config_json)
 
-        # Detect expected input shape dynamically from reconstructed model
-        in_shape = full_model.input_shape
+        # Detect model's native input resolution from config
+        in_shape = model.input_shape
         if isinstance(in_shape, list):
             in_shape = in_shape[0]
         h = in_shape[1] if (len(in_shape) > 1 and in_shape[1] is not None) else input_shape[0]
         w = in_shape[2] if (len(in_shape) > 2 and in_shape[2] is not None) else input_shape[1]
 
-        dummy_zip = tf.zeros((1, h, w, 3), dtype=tf.float32)
-        _ = full_model(dummy_zip, training=False)
-        full_model.load_weights(str(temp_h5_path))
-        print(f"[v] Loaded model via config-from-zip + HDF5 weights fallback! (Input resolution: {h}x{w})")
-        return full_model
+        # Force build() for every layer (ensures all weights exist before assignment)
+        _ = model(tf.zeros((1, h, w, 3), dtype=tf.float32), training=False)
+
+        n_assigned = _load_weights_from_keras_h5(model, h5_bytes)
+        total_vars = len(model.variables)
+        print(f"[v] Loaded {n_assigned}/{total_vars} variables from h5 (input: {h}x{w})!")
+        if n_assigned > 0:
+            return model
+        raise ValueError(f"h5py traversal assigned 0 variables — architecture may not match.")
+    except Exception as err:
+        e1 = err
+        print(f"[!] config-from-zip + h5py failed ({type(e1).__name__}: {e1}). Trying local build...")
+
+    # ── Strategy 2: local CORAL build → h5py direct assignment ────────────────
+    e2 = None
+    try:
+        local_model = build_coral_efficientnet_b3(input_shape=input_shape)
+        _ = local_model(tf.zeros((1,) + tuple(input_shape), dtype=tf.float32), training=False)
+
+        n_assigned = _load_weights_from_keras_h5(local_model, h5_bytes)
+        total_vars = len(local_model.variables)
+        print(f"[v] Loaded {n_assigned}/{total_vars} variables into local CORAL model!")
+        if n_assigned > 0:
+            return local_model
+        raise ValueError("h5py traversal assigned 0 variables for local build.")
     except Exception as err:
         e2 = err
 
-    # Strategy 3: Local architecture build + load_weights from extracted HDF5
-    e3 = None
-    try:
-        local_model = build_coral_efficientnet_b3(input_shape=input_shape)
-        _ = local_model(dummy, training=False)
-        if 'temp_h5_path' in locals() and temp_h5_path.exists():
-            local_model.load_weights(str(temp_h5_path))
-        else:
-            local_model.load_weights(model_path)
-        print("[v] Loaded weights into local CORAL model architecture!")
-        return local_model
-    except Exception as err:
-        e3 = err
-
     raise ValueError(
         f"Could not load model from {model_path}.\n"
-        f"  - load_model          : {e1}\n"
-        f"  - config_zip_fallback : {e2}\n"
-        f"  - local_build         : {e3}"
+        f"  - config_zip + h5py  : {e1}\n"
+        f"  - local_build + h5py : {e2}"
     )
 
 
