@@ -576,18 +576,25 @@ def train_keras_semi_supervised(
     is_coral = (num_outputs == 4)
     print(f"[*] Detected model output neurons: {num_outputs} ({'CORAL Ordinal Regression (5 DR grades)' if is_coral else 'Standard Softmax'})")
 
-    # 2. Discover Unlabeled Images & Generate Pseudo-labels
-    unlabeled_images = discover_unlabeled_images(Path(unlabeled_dir))
-    pseudo_df = generate_pseudo_labels_keras(
-        model,
-        unlabeled_images,
-        threshold=threshold,
-        batch_size=batch_size,
-        input_size=input_size,
-    )
+    # 2. Discover Unlabeled Images & Generate/Load Pseudo-labels
     pseudo_csv_path = output_path / "pseudo_labels.csv"
-    pseudo_df.to_csv(pseudo_csv_path, index=False)
-    print(f"[v] Saved pseudo-labels to {pseudo_csv_path}")
+    if pseudo_csv_path.exists():
+        print(f"[v] Found existing pseudo-labels at: {pseudo_csv_path}")
+        print("[*] Loading existing pseudo-labels to bypass predicting 41,000+ images...")
+        pseudo_df = pd.read_csv(pseudo_csv_path)
+        print(f"[v] Loaded {len(pseudo_df)} pseudo-labels successfully.")
+    else:
+        unlabeled_images = discover_unlabeled_images(Path(unlabeled_dir))
+        pseudo_df = generate_pseudo_labels_keras(
+            model,
+            unlabeled_images,
+            threshold=threshold,
+            batch_size=batch_size,
+            input_size=input_size,
+        )
+        pseudo_df.to_csv(pseudo_csv_path, index=False)
+        print(f"[v] Saved generated pseudo-labels to {pseudo_csv_path}")
+
 
     # 3. Load Labeled Data
     labeled_df = pd.read_csv(labeled_csv)
