@@ -586,7 +586,9 @@ def train_keras_semi_supervised(
     )
 
     # 5. Compile Model
-    optimizer = optimizers.Adam(learning_rate=lr)
+    # Add clipnorm=1.0 to prevent gradient explosion (NaN loss) during deep network fine-tuning
+    optimizer = optimizers.Adam(learning_rate=lr, clipnorm=1.0)
+
     if is_coral:
         loss_fn = "binary_crossentropy"
         metrics_list = ["binary_accuracy", "mae"]
