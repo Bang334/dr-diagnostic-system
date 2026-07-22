@@ -114,26 +114,22 @@ class PreprocessInputLayer(tf.keras.layers.Layer):
 
 @tf.keras.utils.register_keras_serializable(package="Custom", name="GeMPoolingLayer")
 class GeMPoolingLayer(tf.keras.layers.Layer):
-    """Custom Generalized Mean Pooling (GeM) layer present in teacher's model checkpoint.
-
-    NOTE: weight 'p' is created in __init__ (not build) because it is shape-independent.
-    This ensures the variable exists immediately after deserialization, before any
-    forward pass triggers build(), allowing load_weights() to find 'p' by name.
-    """
+    """Custom Generalized Mean Pooling (GeM) layer present in teacher's model checkpoint."""
     def __init__(self, p: float = 3.0, eps: float = 1e-6, **kwargs):
         super().__init__(**kwargs)
         self.p_init = float(p)
         self.eps = float(eps)
-        # Create weight here so Keras load_weights can always find it by name
+
+    def build(self, input_shape):
+        # Standard Keras pattern: create weight in build() so it is always
+        # properly tracked. Strategy 2 in the loader guarantees build() is
+        # triggered via a dummy forward pass BEFORE load_weights runs.
         self.p = self.add_weight(
             name="p",
             shape=(1,),
             initializer=tf.keras.initializers.Constant(self.p_init),
             trainable=True,
         )
-
-    def build(self, input_shape):
-        # Weight already created in __init__; just mark as built.
         super().build(input_shape)
 
     def call(self, inputs, training=None):
@@ -159,9 +155,18 @@ def load_keras_grade_model(
 
     Tries the following strategies in order:
       1. tf.keras.models.load_model with registered custom layers.
-      2. Manual GeMPoolingLayer-based architecture, auto-detecting num_classes (4 then 5).
-      3. GlobalAveragePooling2D architecture, auto-detecting num_classes (4 then 5).
+         Fast path for fresh Colab sessions.
+      2. Extract config.json from .keras zip → model_from_json → dummy forward
+         pass → load_weights.  The explicit forward pass forces build() on every
+         layer (including GeMPoolingLayer) before weight assignment.
+      3. Manual GeM / GAP architecture + heuristic weight loading.
+         Reads model.weights.h5 from the zip and assigns weights by matching
+         variable name + shape, bypassing the path-based Keras loader.
     """
+    import zipfile
+    import io
+    import json as _json
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
 
@@ -173,24 +178,85 @@ def load_keras_grade_model(
         "GeMPoolingLayer": GeMPoolingLayer,
     }
 
-    # ── Strategy 1: tf.keras.models.load_model ──────────────────────────────────
-    e_direct = None
+    # ── Strategy 1: tf.keras.models.load_model ────────────────────────────────
+    e1 = None
     try:
         model = tf.keras.models.load_model(model_path, custom_objects=custom_objs, compile=False)
         print("[v] Loaded via tf.keras.models.load_model!")
         return model
     except Exception as err:
-        e_direct = err
-        print(f"[!] Direct load_model failed ({type(err).__name__}: {err}). Trying manual reconstruction...")
+        e1 = err
+        print(f"[!] direct_load failed ({type(err).__name__}). Trying config-from-zip...")
 
-    # ── Strategy 2: Manual GeM architecture, try num_classes 4 then 5 ───────────
-    # The teacher's checkpoint has 4 output classes (DR grade 0-3).
-    # We auto-detect by trying 4 first, then falling back to 5.
+    # ── Strategy 2: config.json from zip → model_from_json → dummy → load_weights
+    # This forces build() on every sub-layer (including GeMPoolingLayer) BEFORE
+    # load_weights runs, so GeMPoolingLayer.p is guaranteed to exist.
+    e2 = None
+    try:
+        with zipfile.ZipFile(model_path, "r") as zf:
+            config_json = zf.read("config.json").decode("utf-8")
+
+        with tf.keras.utils.custom_object_scope(custom_objs):
+            model = tf.keras.models.model_from_json(config_json)
+
+        # Force-build all layers so every add_weight / build() is executed
+        dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
+        _ = model(dummy, training=False)
+
+        # Now load weights; GeMPoolingLayer has its variable 'p' → no mismatch
+        model.load_weights(model_path)
+        print("[v] Loaded via config-from-zip + dummy-build + load_weights!")
+        return model
+    except Exception as err:
+        e2 = err
+        print(f"[!] config-zip strategy failed ({type(err).__name__}: {err}). Trying heuristic h5 matching...")
+
+    # ── Strategy 3: Manual architecture + heuristic weight matching ───────────
+    # Reads model.weights.h5 directly from the zip and assigns each variable by
+    # matching its base name AND shape, regardless of layer-path differences
+    # between our manual model and the checkpoint (e.g., missing augmentation layers).
+    def _load_weights_heuristic(model: tf.keras.Model, keras_path: str) -> int:
+        """Return number of variables successfully loaded."""
+        import h5py
+        import numpy as np
+
+        with zipfile.ZipFile(keras_path, "r") as zf:
+            h5_data = io.BytesIO(zf.read("model.weights.h5"))
+
+        # Collect all h5 datasets as {full_path: array}
+        saved: dict = {}
+
+        def _visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                saved[name] = obj[()]  # read array
+
+        with h5py.File(h5_data, "r") as h5f:
+            h5f.visititems(_visit)
+
+        all_vars = model.trainable_variables + model.non_trainable_variables
+        loaded = 0
+        for var in all_vars:
+            # variable name looks like "gem_pooling/p:0" → base = "p"
+            base = var.name.split("/")[-1].replace(":0", "")
+            shape = tuple(var.shape)
+            # All h5 datasets whose last path component matches and shape matches
+            candidates = [(k, v) for k, v in saved.items()
+                          if k.split("/")[-1] == base and tuple(v.shape) == shape]
+            if len(candidates) == 1:
+                var.assign(candidates[0][1])
+                loaded += 1
+            elif len(candidates) > 1:
+                # Prefer datasets whose path includes the layer name
+                layer_hint = var.name.split("/")[-2] if var.name.count("/") >= 2 else ""
+                specific = [(k, v) for k, v in candidates if layer_hint in k]
+                if len(specific) == 1:
+                    var.assign(specific[0][1])
+                    loaded += 1
+        return loaded
+
     def _build_gem_model(n_cls: int) -> tf.keras.Model:
-        """Build EfficientNetB3 + GeM + BN + Dense(256) x2 + Dense(n_cls) matching teacher's head."""
         from tensorflow.keras.applications import EfficientNetB3 as _EB3
         inputs = tf.keras.Input(shape=input_shape)
-        # Skip augmentation / preprocessing wrappers – load raw pixel values
         base = _EB3(weights=None, include_top=False, input_tensor=inputs)
         x = GeMPoolingLayer(p=3.0, name="gem_pooling")(base.output)
         x = tf.keras.layers.BatchNormalization(name="batch_normalization")(x)
@@ -201,23 +267,7 @@ def load_keras_grade_model(
         out = tf.keras.layers.Dense(n_cls, activation="softmax", name="predictions")(x)
         return tf.keras.Model(inputs=inputs, outputs=out)
 
-    e_gem4, e_gem5 = None, None
-    for n_cls, e_slot in [(4, "e_gem4"), (5, "e_gem5")]:
-        try:
-            model = _build_gem_model(n_cls)
-            model.load_weights(model_path, by_name=True, skip_mismatch=False)
-            print(f"[v] Loaded via GeM architecture with num_classes={n_cls}!")
-            return model
-        except Exception as err:
-            if n_cls == 4:
-                e_gem4 = err
-            else:
-                e_gem5 = err
-            print(f"[!] GeM/{n_cls}-class load failed ({type(err).__name__}: {err}).")
-
-    # ── Strategy 3: GAP architecture, try num_classes 4 then 5 ──────────────────
     def _build_gap_model(n_cls: int) -> tf.keras.Model:
-        """Fallback: EfficientNetB3 + GlobalAveragePooling2D + Dense(256) + Dense(n_cls)."""
         from tensorflow.keras.applications import EfficientNetB3 as _EB3
         inputs = tf.keras.Input(shape=input_shape)
         base = _EB3(weights=None, include_top=False, input_tensor=inputs)
@@ -230,28 +280,28 @@ def load_keras_grade_model(
         out = tf.keras.layers.Dense(n_cls, activation="softmax", name="predictions")(x)
         return tf.keras.Model(inputs=inputs, outputs=out)
 
-    e_gap4, e_gap5 = None, None
-    for n_cls, e_slot in [(4, "e_gap4"), (5, "e_gap5")]:
-        try:
-            model = _build_gap_model(n_cls)
-            model.load_weights(model_path, by_name=True, skip_mismatch=False)
-            print(f"[v] Loaded via GAP architecture with num_classes={n_cls}!")
-            return model
-        except Exception as err:
-            if n_cls == 4:
-                e_gap4 = err
-            else:
-                e_gap5 = err
-            print(f"[!] GAP/{n_cls}-class load failed ({type(err).__name__}: {err}).")
+    e3 = None
+    dummy_h = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
+    for builder, tag in [(_build_gem_model, "GeM"), (_build_gap_model, "GAP")]:
+        for n_cls in [4, 5]:
+            try:
+                model = builder(n_cls)
+                _ = model(dummy_h, training=False)  # force build
+                n_loaded = _load_weights_heuristic(model, model_path)
+                total_vars = len(model.trainable_variables + model.non_trainable_variables)
+                print(f"[v] {tag}/{n_cls}-class: heuristic loaded {n_loaded}/{total_vars} variables.")
+                if n_loaded > 0:
+                    return model
+            except Exception as err:
+                e3 = err
+                print(f"[!] {tag}/{n_cls}-class heuristic failed ({type(err).__name__}: {err}).")
 
     raise ValueError(
         f"Could not load model checkpoint from {model_path}.\n"
         f"Errors:\n"
-        f"  - direct_load : {e_direct}\n"
-        f"  - gem/4-class : {e_gem4}\n"
-        f"  - gem/5-class : {e_gem5}\n"
-        f"  - gap/4-class : {e_gap4}\n"
-        f"  - gap/5-class : {e_gap5}"
+        f"  - direct_load  : {e1}\n"
+        f"  - config_zip   : {e2}\n"
+        f"  - heuristic_h5 : {e3}"
     )
 
 
