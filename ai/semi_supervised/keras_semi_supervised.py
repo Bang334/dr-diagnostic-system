@@ -207,8 +207,12 @@ def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes) -> int:
     from collections import defaultdict
 
     def to_snake(name: str) -> str:
+        # Split before uppercase that follows a run of uppercase+lowercase (e.g., GeMPooling)
         name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-        return re.sub(r"([a-z\d])([A-Z])", r"\1_\2", name).lower()
+        # Split before uppercase that follows a lowercase letter only (NOT a digit)
+        # This keeps "2D" together as "2d" (conv2d, not conv2_d)
+        name = re.sub(r"([a-z])([A-Z])", r"\1_\2", name)
+        return name.lower()
 
     assigned_count = [0]
 
