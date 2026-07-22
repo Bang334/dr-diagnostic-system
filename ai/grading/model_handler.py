@@ -11,6 +11,51 @@ CLASS_NAMES = [
     "Proliferative DR"
 ]
 
+def build_efficientnet_b3(
+    input_shape: tuple = (300, 300, 3),
+    num_classes: int = 5,
+    weights: str = None,
+    training_base: bool = False,
+    include_augmentation: bool = True,
+):
+    """
+    Xây dựng kiến trúc EfficientNetB3 chuẩn cho classification 5 lớp DR grade.
+    Khớp 100% cấu trúc lớp với checkpoint best_EfficientNetB3_rgb_crop_v1.keras.
+    """
+    from tensorflow.keras import layers, models
+    from tensorflow.keras.applications import EfficientNetB3
+    from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+
+    inputs = layers.Input(shape=input_shape)
+    x = inputs
+
+    if include_augmentation:
+        data_augmentation = models.Sequential([
+            layers.RandomFlip("horizontal"),
+            layers.RandomRotation(0.05),
+            layers.RandomZoom((-0.1, 0.1)),
+        ], name="data_augmentation")
+        x = data_augmentation(x)
+
+    x = layers.Lambda(effnet_preprocess, name="preprocess_input")(x)
+    
+    base_model = EfficientNetB3(weights=weights, include_top=False, input_shape=input_shape)
+    x = base_model(x, training=training_base)
+
+    avg_pool = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+    max_pool = layers.GlobalMaxPooling2D(name="max_pool")(x)
+    x = layers.Concatenate(name="dual_pool")([avg_pool, max_pool])
+
+    x = layers.BatchNormalization()(x)
+    x = layers.Dense(512, activation='relu', name="head_dense1")(x)
+    x = layers.Dropout(0.5)(x)
+    x = layers.Dense(128, activation='relu', name="head_dense2")(x)
+    x = layers.Dropout(0.3)(x)
+
+    outputs = layers.Dense(num_classes, activation='softmax', dtype='float32', name="predictions")(x)
+    return models.Model(inputs, outputs, name="DR_EfficientNetB3_Grading")
+
+
 class DRModelHandler:
     def __init__(self, model_path: str):
         """
@@ -31,41 +76,14 @@ class DRModelHandler:
             
         print(f"[*] Đang load model từ {self.model_path}...")
         try:
-            # KHẮC PHỤC LỖI KHÁC VERSION KERAS (quantization_config):
             # Tự build lại ĐÚNG y hệt kiến trúc model thay vì dùng load_model để tránh lỗi parse config.
-            from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
-            from tensorflow.keras import layers, models
-            from tensorflow.keras.applications import EfficientNetB3
-            
-            data_augmentation = models.Sequential([
-                # Kept for checkpoint compatibility. These layers are disabled
-                # automatically during model.predict().
-                layers.RandomFlip("horizontal"),
-                layers.RandomRotation(0.05),
-                layers.RandomZoom((-0.1, 0.1)),
-            ], name="data_augmentation")
-
-            inputs = layers.Input(shape=(300, 300, 3))
-            x = data_augmentation(inputs)
-            x = layers.Lambda(effnet_preprocess, name="preprocess_input")(x)
-            
-            # In inference the complete trained checkpoint is loaded below, so
-            # downloading ImageNet weights here would be redundant.
-            base_model = EfficientNetB3(weights=None, include_top=False, input_shape=(300, 300, 3))
-            x = base_model(x, training=False)
-
-            avg_pool = layers.GlobalAveragePooling2D(name="avg_pool")(x)
-            max_pool = layers.GlobalMaxPooling2D(name="max_pool")(x)
-            x = layers.Concatenate(name="dual_pool")([avg_pool, max_pool])
-
-            x = layers.BatchNormalization()(x)
-            x = layers.Dense(512, activation='relu', name="head_dense1")(x)
-            x = layers.Dropout(0.5)(x)
-            x = layers.Dense(128, activation='relu', name="head_dense2")(x)
-            x = layers.Dropout(0.3)(x)
-
-            outputs = layers.Dense(5, activation='softmax', dtype='float32', name="predictions")(x)
-            self.model = models.Model(inputs, outputs)
+            self.model = build_efficientnet_b3(
+                input_shape=(300, 300, 3),
+                num_classes=5,
+                weights=None,
+                training_base=False,
+                include_augmentation=True,
+            )
             
             # Load trọng số vào khung kiến trúc đã dựng chuẩn
             self.model.load_weights(self.model_path)
