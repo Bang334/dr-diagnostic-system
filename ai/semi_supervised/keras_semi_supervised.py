@@ -247,12 +247,15 @@ def _load_weights_from_keras_h5(model: tf.keras.Model, h5_bytes: bytes, verbose:
                         try:
                             var.assign(tf.cast(data, var.dtype))
                             assigned_var_ids.add(id(var))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            if verbose:
+                                print(f"  [!] Failed to assign {var.name} from {dataset_path}: {e}")
+
 
             # Recurse into sub-models (e.g., EfficientNetB3 backbone)
             if hasattr(layer, "layers") and len(layer.layers) > 0 and "layers" in grp:
                 assign_from_group(grp["layers"], layer.layers, depth + 1, f"{full_path}/layers")
+
 
     # ── Pass 1: tree traversal by class-name-snake-case ──────────────────────
     with h5py.File(io.BytesIO(h5_bytes), "r") as h5f:
