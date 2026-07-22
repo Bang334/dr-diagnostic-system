@@ -145,6 +145,12 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
         return config
 
 
+@tf.keras.utils.register_keras_serializable(package="Custom", name="ordinal_loss")
+def ordinal_loss(y_true, y_pred):
+    """Custom ordinal loss function present in teacher's model checkpoint."""
+    return tf.keras.losses.binary_crossentropy(y_true, y_pred)
+
+
 def build_coral_efficientnet_b3(input_shape: Tuple[int, int, int] = (300, 300, 3)) -> tf.keras.Model:
     """
     Manually build CORAL EfficientNetB3 model architecture for 5 DR grades (4 output sigmoid neurons).
@@ -175,36 +181,36 @@ def load_keras_grade_model(
     input_shape: Tuple[int, int, int] = (300, 300, 3),
 ) -> tf.keras.Model:
     """
-    Construct model architecture locally in semi-supervised script, then load weights from .keras checkpoint.
+    Load teacher's CORAL EfficientNetB3 grade model from .keras checkpoint.
     """
     import zipfile
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
-    print(f"[*] Building CORAL EfficientNetB3 architecture locally...")
-    model = build_coral_efficientnet_b3(input_shape=input_shape)
+    print(f"[*] Loading Keras Grade Model from: {model_path}")
 
-    # Force build all weights via a dummy forward pass
-    dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
-    _ = model(dummy, training=False)
-
-    print(f"[*] Loading weights from checkpoint: {model_path}")
-
-    # Strategy 1: Load weights directly into locally built model
-    try:
-        model.load_weights(model_path)
-        print("[v] Successfully loaded weights into local CORAL model architecture!")
-        return model
-    except Exception as e1:
-        print(f"[!] Direct load_weights failed ({type(e1).__name__}: {e1}). Trying config-from-zip fallback...")
-
-    # Strategy 2: Fallback to reading config.json from zip if layer structure differs
     custom_objs = {
         "CutOutLayer": CutOutLayer,
         "PreprocessInputLayer": PreprocessInputLayer,
         "GeMPoolingLayer": GeMPoolingLayer,
+        "ordinal_loss": ordinal_loss,
     }
+
+    dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
+
+    # Strategy 1: Direct tf.keras.models.load_model with registered custom objects & loss
+    e1 = None
+    try:
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objs, compile=False)
+        print("[v] Successfully loaded model via tf.keras.models.load_model!")
+        return model
+    except Exception as err:
+        e1 = err
+        print(f"[!] Direct load_model failed ({type(e1).__name__}: {e1}). Trying config-from-zip fallback...")
+
+    # Strategy 2: Read config.json from zip -> model_from_json -> dummy forward -> load_weights
+    e2 = None
     try:
         with zipfile.ZipFile(model_path, "r") as zf:
             config_json = zf.read("config.json").decode("utf-8")
@@ -216,12 +222,26 @@ def load_keras_grade_model(
         full_model.load_weights(model_path)
         print("[v] Loaded model via config-from-zip fallback!")
         return full_model
-    except Exception as e2:
-        raise ValueError(
-            f"Could not load model weights from {model_path}.\n"
-            f"  - local_build_load_weights : {e1}\n"
-            f"  - config_zip_fallback      : {e2}"
-        )
+    except Exception as err:
+        e2 = err
+
+    # Strategy 3: Local architecture build + load_weights
+    e3 = None
+    try:
+        local_model = build_coral_efficientnet_b3(input_shape=input_shape)
+        _ = local_model(dummy, training=False)
+        local_model.load_weights(model_path)
+        print("[v] Loaded weights into local CORAL model architecture!")
+        return local_model
+    except Exception as err:
+        e3 = err
+
+    raise ValueError(
+        f"Could not load model from {model_path}.\n"
+        f"  - load_model          : {e1}\n"
+        f"  - config_zip_fallback : {e2}\n"
+        f"  - local_build         : {e3}"
+    )
 
 
 
