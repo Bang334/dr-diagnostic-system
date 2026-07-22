@@ -79,6 +79,22 @@ def build_efficientnet_b3(
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 
+@tf.keras.utils.register_keras_serializable(package="Custom", name="CutOutLayer")
+class CutOutLayer(tf.keras.layers.Layer):
+    """Custom CutOut augmentation layer present in teacher's model checkpoint."""
+    def __init__(self, mask_size_ratio: float = 0.0, **kwargs):
+        super().__init__(**kwargs)
+        self.mask_size_ratio = mask_size_ratio
+
+    def call(self, inputs, training=None):
+        return inputs
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"mask_size_ratio": self.mask_size_ratio})
+        return config
+
+
 def load_keras_grade_model(
     model_path: str,
     input_shape: Tuple[int, int, int] = (300, 300, 3),
@@ -86,19 +102,29 @@ def load_keras_grade_model(
 ) -> tf.keras.Model:
     """
     Build EfficientNetB3 architecture and load weights from .keras or .h5 checkpoint.
-    Robust loader trying direct load_model first, followed by custom functional and sequential fallbacks.
+    Robust loader trying direct load_model first (with registered CutOutLayer), followed by custom fallbacks.
     """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
 
     print(f"[*] Loading Keras Grade Model from: {model_path}")
 
-    # Strategy 1: Direct Keras model load (reads model config & weights stored inside .keras zip)
+    e_direct = None
+    e1 = None
+    e2 = None
+    e3 = None
+
+    # Strategy 1: Direct Keras model load with registered CutOutLayer
     try:
-        model = tf.keras.models.load_model(model_path, compile=False)
-        print("[v] Keras Grade Model loaded successfully via tf.keras.models.load_model!")
+        model = tf.keras.models.load_model(
+            model_path,
+            custom_objects={"CutOutLayer": CutOutLayer},
+            compile=False,
+        )
+        print("[v] Keras Grade Model loaded successfully via tf.keras.models.load_model (with CutOutLayer)!")
         return model
-    except Exception as e_direct:
+    except Exception as err:
+        e_direct = err
         print(f"[!] Direct load_model failed ({e_direct}). Attempting custom architecture reconstruction...")
 
     # Strategy 2: Single GlobalAveragePooling2D (1536 channels)
@@ -114,7 +140,8 @@ def load_keras_grade_model(
         model.load_weights(model_path)
         print("[v] Keras Grade Model loaded successfully (Single Pooling - 1536 channels)!")
         return model
-    except Exception as e1:
+    except Exception as err:
+        e1 = err
         print(f"[!] Single pooling load failed. Trying Dual Pooling (3072 channels)...")
 
     # Strategy 3: Dual Pooling (3072 channels)
@@ -130,10 +157,11 @@ def load_keras_grade_model(
         model.load_weights(model_path)
         print("[v] Keras Grade Model loaded successfully (Dual Pooling - 3072 channels)!")
         return model
-    except Exception as e2:
+    except Exception as err:
+        e2 = err
         print(f"[!] Dual pooling load failed. Trying Simple Sequential fallback...")
 
-    # Strategy 4: Simple Sequential (Base -> GAP -> Dropout -> Dense(5))
+    # Strategy 4: Simple Sequential (Base -> GAP -> Dense 256 -> Dense 5)
     try:
         from tensorflow.keras import layers, models
         from tensorflow.keras.applications import EfficientNetB3
@@ -143,15 +171,18 @@ def load_keras_grade_model(
             base_model,
             layers.GlobalAveragePooling2D(),
             layers.Dropout(0.2),
+            layers.Dense(256, activation="relu"),
+            layers.Dropout(0.2),
             layers.Dense(num_classes, activation="softmax"),
         ])
         model.load_weights(model_path)
-        print("[v] Keras Grade Model loaded successfully (Simple Sequential)!")
+        print("[v] Keras Grade Model loaded successfully (Simple Sequential Dense 256)!")
         return model
-    except Exception as e3:
+    except Exception as err:
+        e3 = err
         raise ValueError(
-            f"Could not load model checkpoint from {model_path}. "
-            f"Errors: direct_load={e_direct}, single_pool={e1}, dual_pool={e2}, sequential={e3}"
+            f"Could not load model checkpoint from {model_path}.\n"
+            f"Errors:\n  - direct_load={e_direct}\n  - single_pool={e1}\n  - dual_pool={e2}\n  - sequential={e3}"
         )
 
 
