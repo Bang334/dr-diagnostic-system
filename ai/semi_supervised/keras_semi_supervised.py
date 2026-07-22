@@ -145,61 +145,82 @@ class GeMPoolingLayer(tf.keras.layers.Layer):
         return config
 
 
+def build_coral_efficientnet_b3(input_shape: Tuple[int, int, int] = (300, 300, 3)) -> tf.keras.Model:
+    """
+    Manually build CORAL EfficientNetB3 model architecture for 5 DR grades (4 output sigmoid neurons).
+    Matches teacher's layer names: GeMPoolingLayer, BatchNormalization, Dense(256), Dense(256), Dense(4).
+    """
+    from tensorflow.keras.applications import EfficientNetB3
+    from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+
+    inputs = tf.keras.Input(shape=input_shape, name="input_layer")
+    x = tf.keras.layers.Lambda(effnet_preprocess, name="preprocess_input")(inputs)
+
+    base = EfficientNetB3(weights=None, include_top=False, input_tensor=x)
+    
+    x = GeMPoolingLayer(p=3.0, name="gem_pooling")(base.output)
+    x = tf.keras.layers.BatchNormalization(name="batch_normalization")(x)
+    x = tf.keras.layers.Dense(256, name="head_dense1")(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(256, name="head_dense2")(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    outputs = tf.keras.layers.Dense(4, activation="sigmoid", name="ordinal_output")(x)
+
+    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="CORAL_EfficientNetB3")
+    return model
+
+
 def load_keras_grade_model(
     model_path: str,
     input_shape: Tuple[int, int, int] = (300, 300, 3),
-    num_classes: int = 5,
 ) -> tf.keras.Model:
     """
-    Load EfficientNetB3 grade model from a .keras checkpoint.
-
-    A .keras file is a ZIP containing config.json + model.weights.h5.
-    Strategy 1: tf.keras.models.load_model (fast path, works in fresh sessions).
-    Strategy 2: Read config.json from the zip → rebuild model → dummy forward pass
-                (forces build() on every layer) → load_weights from the same zip.
+    Construct model architecture locally in semi-supervised script, then load weights from .keras checkpoint.
     """
     import zipfile
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
-    print(f"[*] Loading Keras Grade Model from: {model_path}")
+    print(f"[*] Building CORAL EfficientNetB3 architecture locally...")
+    model = build_coral_efficientnet_b3(input_shape=input_shape)
 
+    # Force build all weights via a dummy forward pass
+    dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
+    _ = model(dummy, training=False)
+
+    print(f"[*] Loading weights from checkpoint: {model_path}")
+
+    # Strategy 1: Load weights directly into locally built model
+    try:
+        model.load_weights(model_path)
+        print("[v] Successfully loaded weights into local CORAL model architecture!")
+        return model
+    except Exception as e1:
+        print(f"[!] Direct load_weights failed ({type(e1).__name__}: {e1}). Trying config-from-zip fallback...")
+
+    # Strategy 2: Fallback to reading config.json from zip if layer structure differs
     custom_objs = {
         "CutOutLayer": CutOutLayer,
         "PreprocessInputLayer": PreprocessInputLayer,
         "GeMPoolingLayer": GeMPoolingLayer,
     }
-
-    # ── Strategy 1: direct tf.keras.models.load_model ─────────────────────────
-    try:
-        model = tf.keras.models.load_model(model_path, custom_objects=custom_objs, compile=False)
-        print("[v] Loaded via tf.keras.models.load_model!")
-        return model
-    except Exception as e1:
-        print(f"[!] direct load_model failed ({type(e1).__name__}). Falling back to config-from-zip...")
-
-    # ── Strategy 2: config.json from zip → dummy forward → load_weights ───────
-    # The dummy forward pass forces build() on every sub-layer (including
-    # GeMPoolingLayer) so its trainable weight 'p' exists before load_weights runs.
     try:
         with zipfile.ZipFile(model_path, "r") as zf:
             config_json = zf.read("config.json").decode("utf-8")
 
         with tf.keras.utils.custom_object_scope(custom_objs):
-            model = tf.keras.models.model_from_json(config_json)
+            full_model = tf.keras.models.model_from_json(config_json)
 
-        dummy = tf.zeros((1,) + tuple(input_shape), dtype=tf.float32)
-        _ = model(dummy, training=False)   # build all layers
-
-        model.load_weights(model_path)     # weights now load cleanly
-        print("[v] Loaded via config-from-zip + dummy forward + load_weights!")
-        return model
+        _ = full_model(dummy, training=False)
+        full_model.load_weights(model_path)
+        print("[v] Loaded model via config-from-zip fallback!")
+        return full_model
     except Exception as e2:
         raise ValueError(
-            f"Could not load model from {model_path}.\n"
-            f"  - direct_load : {e1}\n"
-            f"  - config_zip  : {e2}"
+            f"Could not load model weights from {model_path}.\n"
+            f"  - local_build_load_weights : {e1}\n"
+            f"  - config_zip_fallback      : {e2}"
         )
 
 
