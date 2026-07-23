@@ -1,4 +1,4 @@
-"""Continue a RETFound grading checkpoint with confidence-filtered pseudo-labels.
+"""Train semi-supervised v2 from a canonical grading checkpoint.
 
 Only the fixed training split and an external unlabeled image directory are
 used for optimization. The validation split selects checkpoints. The test
@@ -34,7 +34,7 @@ from ai.grading.train import (
     is_head_parameter,
     save_evaluation_artifacts,
 )
-from ai.semi_supervised.research_utils import (
+from ai.train_semi_v2.runtime import (
     PseudoLabeledFundusDataset,
     UnlabeledFundusDataset,
     WeightedLabeledDataset,
@@ -47,11 +47,27 @@ from ai.semi_supervised.research_utils import (
     save_classifier_checkpoint,
     seed_everything,
 )
+from ai.train_semi_v2.pseudo_cache import PseudoLabelCache, PseudoLabelCacheSpec
+
+
+_LOG_PATH: Optional[Path] = None
+
+
+def configure_log_file(path: Optional[Path]) -> None:
+    """Mirror structured progress messages to a durable UTF-8 log."""
+    global _LOG_PATH
+    _LOG_PATH = path
+    if _LOG_PATH is not None:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def log(message: str) -> None:
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
+    line = f"[{timestamp}] {message}"
+    print(line, flush=True)
+    if _LOG_PATH is not None:
+        with _LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 def format_duration(seconds: float) -> str:
@@ -188,6 +204,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="External directory containing genuinely unlabeled fundus images",
     )
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--pseudo-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Persistent pseudo-label cache shared by runs. Matching teacher, "
+            "unlabeled manifest, preprocessing and threshold skip inference."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=6)
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -231,7 +256,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--enhance", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.pseudo_cache_dir is None:
+        args.pseudo_cache_dir = args.output_dir.parent / "pseudo-label-cache-v2"
+    return args
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -474,9 +502,10 @@ def evaluate_held_out_test(
 
 def run(args: argparse.Namespace) -> None:
     run_started_at = time.perf_counter()
-    log("[1/7] Validating arguments and preparing run directory...")
     validate_args(args)
     args.output_dir = prepare_output_dir(args.output_dir, args.resume)
+    configure_log_file(args.output_dir / "training.log")
+    log("[1/7] Arguments validated and run directory prepared.")
     seed_everything(args.seed)
 
     log("[2/7] Checking CUDA availability...")
@@ -518,6 +547,7 @@ def run(args: argparse.Namespace) -> None:
     replay_manifest_path = args.output_dir / "labeled_replay_manifest.csv"
     unlabeled_manifest_path = args.output_dir / "unlabeled_scan_manifest.csv"
     pseudo_path = args.output_dir / "pseudo_labels.csv"
+    pseudo_cache_record_path = args.output_dir / "pseudo_cache_record.json"
     baseline_path = args.output_dir / "baseline_metrics.json"
 
     if resume_state is not None:
@@ -652,14 +682,53 @@ def run(args: argparse.Namespace) -> None:
             f"max_per_class={args.max_pseudo_per_class}, "
             f"images={selected_unlabeled_count:,}."
         )
-        pseudo_frame = generate_pseudo_labels(
-            model,
-            unlabeled_loader,
-            device,
-            threshold=args.threshold,
-            max_per_class=args.max_pseudo_per_class,
-            amp_enabled=amp_enabled,
-        )
+        def predict_pseudo_labels() -> pd.DataFrame:
+            return generate_pseudo_labels(
+                model,
+                unlabeled_loader,
+                device,
+                threshold=args.threshold,
+                max_per_class=args.max_pseudo_per_class,
+                amp_enabled=amp_enabled,
+            )
+
+        if args.pseudo_cache_dir is not None:
+            preprocessing = str(getattr(saved_args, "preprocessing", "rgb_crop"))
+            cache = PseudoLabelCache(args.pseudo_cache_dir)
+            cache_result = cache.load_or_generate(
+                PseudoLabelCacheSpec(
+                    threshold=args.threshold,
+                    teacher_checkpoint=args.checkpoint,
+                    unlabeled_paths=tuple(unlabeled_paths),
+                    preprocessing=preprocessing,
+                    image_size=image_size,
+                    max_pseudo_per_class=args.max_pseudo_per_class,
+                    enhance=args.enhance,
+                ),
+                predict_pseudo_labels,
+            )
+            pseudo_frame = cache_result.frame
+            pseudo_cache_record_path.write_text(
+                json.dumps(
+                    {
+                        "cache_key": cache_result.cache_key,
+                        "reused": cache_result.reused,
+                        "csv_path": os.fspath(cache_result.csv_path),
+                        "metadata_path": os.fspath(cache_result.metadata_path),
+                        "threshold": args.threshold,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            action = "reused" if cache_result.reused else "created"
+            log(
+                f"Pseudo-label cache {action}: key={cache_result.cache_key[:20]}, "
+                f"path={cache_result.csv_path}."
+            )
+        else:
+            pseudo_frame = predict_pseudo_labels()
         if pseudo_frame.empty:
             raise RuntimeError(
                 "No pseudo-label passed the confidence threshold; lower --threshold "
@@ -944,7 +1013,14 @@ def run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    run(parse_args())
+    try:
+        run(parse_args())
+    except KeyboardInterrupt:
+        log(
+            "Training interrupted by user. checkpoint-last.pth from the most "
+            "recent fully completed epoch remains safe; use --resume to continue."
+        )
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

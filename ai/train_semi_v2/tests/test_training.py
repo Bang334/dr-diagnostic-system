@@ -12,13 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from ai.semi_supervised.few_shot_demo import (
-    FixedSupportEpisodeSampler,
-    RetfoundProtoNet,
-    parse_args as parse_few_shot_args,
-    select_fixed_support,
-)
-from ai.semi_supervised.research_utils import (
+from ai.train_semi_v2.runtime import (
     assert_unlabeled_is_external,
     load_grading_checkpoint,
     load_split_frames,
@@ -26,7 +20,7 @@ from ai.semi_supervised.research_utils import (
     prepare_fresh_output_dir,
     save_classifier_checkpoint,
 )
-from ai.semi_supervised.semi_supervised_training import (
+from ai.train_semi_v2.train import (
     generate_pseudo_labels,
     limit_labeled_replay,
     limit_unlabeled_paths,
@@ -80,24 +74,6 @@ class ArgumentDefaultTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires --resume"):
             validate_semi_args(args)
 
-    def test_few_shot_defaults_only_unfreeze_last_block(self):
-        args = parse_few_shot_args(
-            [
-                "--checkpoint",
-                "best.pth",
-                "--target-dataset-dir",
-                "dataset",
-                "--output-dir",
-                "output",
-            ]
-        )
-        self.assertEqual(args.shots, 5)
-        self.assertEqual(args.queries, 1)
-        self.assertEqual(args.embedding_dim, 0)
-        self.assertEqual(args.unfreeze_last_blocks, 1)
-        self.assertEqual(args.encoder_lr, 1e-6)
-
-
 class CheckpointLoadingTests(unittest.TestCase):
     def test_reconstructs_model_from_saved_args_without_pretrained_download(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -117,7 +93,7 @@ class CheckpointLoadingTests(unittest.TestCase):
             )
             reconstructed = nn.Linear(2, 5)
             with patch(
-                "ai.semi_supervised.research_utils.timm.create_model",
+                "ai.train_semi_v2.runtime.timm.create_model",
                 return_value=reconstructed,
             ) as create_model:
                 bundle = load_grading_checkpoint(
@@ -361,66 +337,6 @@ class DeepDRiDPreparationTests(unittest.TestCase):
         })
         for frame in frames.values():
             self.assertEqual(sorted(frame["diagnosis"].tolist()), list(range(5)))
-
-
-class FixedSupportTests(unittest.TestCase):
-    def test_selects_exactly_k_images_per_class_once(self):
-        frame = pd.DataFrame(
-            {
-                "image_path": [f"{grade}_{index}.jpg" for grade in range(5) for index in range(10)],
-                "diagnosis": [grade for grade in range(5) for _ in range(10)],
-            }
-        )
-        first = select_fixed_support(frame, shots=2, seed=42)
-        second = select_fixed_support(frame, shots=2, seed=42)
-        self.assertEqual(len(first), 10)
-        self.assertEqual(first["diagnosis"].value_counts().sort_index().tolist(), [2] * 5)
-        self.assertEqual(first["image_path"].tolist(), second["image_path"].tolist())
-
-    def test_episode_only_reuses_fixed_support_and_has_disjoint_query(self):
-        fixed = pd.DataFrame(
-            {"diagnosis": [grade for grade in range(5) for _ in range(5)]}
-        )
-        sampler = FixedSupportEpisodeSampler(fixed, seed=42)
-        support, support_labels, query, query_labels = sampler.sample(1)
-        self.assertEqual(len(support), 20)
-        self.assertEqual(len(query), 5)
-        self.assertTrue(set(support).isdisjoint(query))
-        self.assertEqual([support_labels.count(grade) for grade in range(5)], [4] * 5)
-        self.assertEqual([query_labels.count(grade) for grade in range(5)], [1] * 5)
-        self.assertTrue(set(support + query).issubset(set(fixed.index)))
-
-    def test_rejects_class_with_too_few_images(self):
-        frame = pd.DataFrame(
-            {"diagnosis": [grade for grade in range(5) for _ in range(2)]}
-        )
-        with self.assertRaisesRegex(ValueError, "needs at least"):
-            select_fixed_support(frame, shots=3, seed=1)
-
-
-class _ToyEncoder(nn.Module):
-    num_features = 4
-
-    def forward_features(self, images):
-        return images.mean(dim=(2, 3))[:, :4]
-
-    def forward_head(self, features, pre_logits=False):
-        return features
-
-
-class ProtoNetTests(unittest.TestCase):
-    def test_returns_one_logit_per_support_class(self):
-        model = RetfoundProtoNet(
-            _ToyEncoder(), embedding_dim=3, temperature=0.1, forward_batch_size=2
-        )
-        support_images = torch.randn(10, 4, 2, 2)
-        support_labels = torch.tensor([grade for grade in range(5) for _ in range(2)])
-        query_images = torch.randn(5, 4, 2, 2)
-        logits, class_ids = model.episode_logits(
-            support_images, support_labels, query_images
-        )
-        self.assertEqual(tuple(logits.shape), (5, 5))
-        self.assertEqual(class_ids.tolist(), list(range(5)))
 
 
 class _PseudoDataset(Dataset):

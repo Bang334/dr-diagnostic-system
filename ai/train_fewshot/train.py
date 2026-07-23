@@ -1,20 +1,22 @@
-"""Fixed-support few-shot adaptation for a new retinal-image domain.
+"""Fixed-support few-shot adaptation connected to a grading checkpoint.
 
 The source grading checkpoint must not have been trained on the target domain.
 Exactly K labeled target images per DR grade are selected once from the target
 training split and saved as a manifest. Adaptation only sees that fixed support
-set. The target test split is used for reporting before/after metrics, never for
-training, early stopping, or checkpoint selection.
+set. The target test split is read only in explicit ``--eval-only`` mode, never
+for training, early stopping, or checkpoint selection.
 """
 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 import os
 import random
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -31,12 +33,30 @@ from ai.grading.train import (
     calculate_metrics,
     create_scaler,
 )
-from ai.semi_supervised.research_utils import (
+from ai.train_fewshot.runtime import (
     load_grading_checkpoint,
     load_split_frames,
     prepare_fresh_output_dir,
     seed_everything,
 )
+
+
+_LOG_PATH: Optional[Path] = None
+
+
+def configure_log_file(path: Optional[Path]) -> None:
+    global _LOG_PATH
+    _LOG_PATH = path
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def log(message: str) -> None:
+    line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+    print(line, flush=True)
+    if _LOG_PATH is not None:
+        with _LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -52,6 +72,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--train-episodes", type=int, default=20)
     parser.add_argument(
         "--shots",
@@ -85,11 +106,29 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--enhance", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Resume from checkpoint-last.pth inside the same output directory",
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate an adapted --resume checkpoint on held-out target test",
+    )
     return parser.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    for name in ("epochs", "train_episodes", "shots", "queries", "forward_batch_size"):
+    for name in (
+        "epochs",
+        "patience",
+        "train_episodes",
+        "shots",
+        "queries",
+        "forward_batch_size",
+    ):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.queries > args.shots:
@@ -102,6 +141,21 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--unfreeze-last-blocks cannot be negative")
     if args.temperature <= 0:
         raise ValueError("--temperature must be positive")
+    if args.eval_only and args.resume is None:
+        raise ValueError("--eval-only requires --resume CHECKPOINT")
+
+
+def prepare_output_dir(output_dir: Path, resume: Optional[Path]) -> Path:
+    output_dir = output_dir.expanduser().resolve()
+    if resume is None:
+        return prepare_fresh_output_dir(output_dir)
+    resume = resume.expanduser().resolve()
+    if not resume.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
+    if resume.parent != output_dir:
+        raise ValueError("--resume must be a checkpoint inside --output-dir")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
 
 def select_fixed_support(frame: pd.DataFrame, shots: int, seed: int) -> pd.DataFrame:
@@ -377,6 +431,13 @@ def save_adapted_checkpoint(
     class_ids: torch.Tensor,
     args: argparse.Namespace,
     saved_args: argparse.Namespace,
+    *,
+    epoch: int,
+    best_support_loss: float,
+    stale_epochs: int,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scaler: Any = None,
+    sampler_state: Any = None,
 ) -> None:
     state: Dict[str, Any] = {
         "method": "fixed_support_target_domain_protonet",
@@ -395,7 +456,16 @@ def save_adapted_checkpoint(
         "support_manifest": "support_manifest.csv",
         "requires_support_set": False,
         "target_test_used_for_selection": False,
+        "epoch": epoch,
+        "best_support_loss": best_support_loss,
+        "stale_epochs": stale_epochs,
     }
+    if optimizer is not None:
+        state["optimizer"] = optimizer.state_dict()
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
+    if sampler_state is not None:
+        state["sampler_state"] = sampler_state
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(state, path)
 
@@ -406,24 +476,68 @@ def _metric_delta(after: Dict[str, Any], before: Dict[str, Any]) -> Dict[str, fl
 
 
 def run(args: argparse.Namespace) -> None:
+    run_started = time.perf_counter()
     validate_args(args)
-    args.output_dir = prepare_fresh_output_dir(args.output_dir)
+    args.output_dir = prepare_output_dir(args.output_dir, args.resume)
+    configure_log_file(args.output_dir / "training.log")
     seed_everything(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required for RETFound few-shot adaptation")
     device = torch.device("cuda")
     amp_enabled = not args.no_amp
+    log(
+        f"GPU={torch.cuda.get_device_name(0)}, AMP={amp_enabled}, "
+        f"mode={'eval' if args.eval_only else 'resume' if args.resume else 'train-new'}"
+    )
 
     bundle = load_grading_checkpoint(args.checkpoint, device, require_ce=True)
     encoder, saved_args = bundle.model, bundle.saved_args
     _assert_target_path_differs_from_recorded_source(saved_args, args.target_dataset_dir)
     frames, _ = load_split_frames(args.target_dataset_dir)
-
-    support_frame = select_fixed_support(frames["train"], args.shots, args.seed)
     support_path = args.output_dir / "support_manifest.csv"
-    support_frame.to_csv(support_path, index=False)
-    print(f"Fixed target support: {len(support_frame)} images ({args.shots}/class)")
-    print(f"Target test images: {len(frames['test'])}; validation split is not used")
+    resume_state = (
+        torch.load(args.resume, map_location=device, weights_only=False)
+        if args.resume is not None
+        else None
+    )
+    if resume_state is not None:
+        saved_few_shot_args = resume_state.get("few_shot_args", {})
+        contract_keys = (
+            "shots",
+            "queries",
+            "embedding_dim",
+            "unfreeze_last_blocks",
+            "temperature",
+            "seed",
+        )
+        mismatches = {
+            key: (saved_few_shot_args.get(key), getattr(args, key))
+            for key in contract_keys
+            if saved_few_shot_args.get(key) != getattr(args, key)
+        }
+        if mismatches:
+            raise ValueError(
+                "Resume configuration differs from checkpoint: "
+                + json.dumps(mismatches, default=str)
+            )
+    if resume_state is None:
+        support_frame = select_fixed_support(frames["train"], args.shots, args.seed)
+        support_frame.to_csv(support_path, index=False)
+    else:
+        if not support_path.is_file():
+            raise FileNotFoundError(
+                f"Resume requires the original fixed support manifest: {support_path}"
+            )
+        support_frame = pd.read_csv(support_path)
+        expected_shots = int(resume_state["few_shot_args"]["shots"])
+        actual_counts = support_frame["diagnosis"].value_counts()
+        if not all(int(actual_counts.get(grade, 0)) == expected_shots for grade in range(NUM_CLASSES)):
+            raise ValueError("Support manifest no longer matches the resume checkpoint")
+    log(
+        f"Fixed target support={len(support_frame)} ({len(support_frame) // NUM_CLASSES}/class); "
+        f"target_train_total={len(frames['train'])}, target_validation_held_out={len(frames['val'])}, "
+        f"target_test_held_out={len(frames['test'])}."
+    )
 
     image_size = int(getattr(saved_args, "image_size", 224))
     train_transform, eval_transform = build_transforms(image_size)
@@ -432,29 +546,54 @@ def run(args: argparse.Namespace) -> None:
     eval_support_dataset = FundusDataset(support_frame, data_args, eval_transform)
     target_test_dataset = FundusDataset(frames["test"], data_args, eval_transform)
 
-    source_metrics = evaluate_source_classifier(
-        encoder,
-        target_test_dataset,
-        device,
-        batch_size=args.forward_batch_size,
-        amp_enabled=amp_enabled,
-    )
+    if args.eval_only:
+        source_metrics = evaluate_source_classifier(
+            encoder,
+            target_test_dataset,
+            device,
+            batch_size=args.forward_batch_size,
+            amp_enabled=amp_enabled,
+        )
+
     trainable_encoder = configure_encoder_trainability(encoder, args.unfreeze_last_blocks)
-    print(f"Trainable encoder parameters: {trainable_encoder / 1e6:.2f}M")
     model = RetfoundProtoNet(
         encoder,
         args.embedding_dim,
         temperature=args.temperature,
         forward_batch_size=args.forward_batch_size,
     ).to(device)
-    before_metrics, _, _ = evaluate_protonet(
-        model,
-        eval_support_dataset,
-        target_test_dataset,
-        device,
-        batch_size=args.forward_batch_size,
-        amp_enabled=amp_enabled,
-    )
+    log(f"Trainable encoder parameters={trainable_encoder / 1e6:.2f}M")
+
+    if resume_state is not None:
+        model.encoder.load_state_dict(resume_state["encoder_model"])
+        model.projection.load_state_dict(resume_state["projection"])
+        log(
+            f"Loaded adapted checkpoint epoch={resume_state.get('epoch', -1) + 1}, "
+            f"best_support_loss={resume_state.get('best_support_loss')}."
+        )
+
+    if args.eval_only:
+        adapted_metrics, prototypes, class_ids = evaluate_protonet(
+            model,
+            eval_support_dataset,
+            target_test_dataset,
+            device,
+            batch_size=args.forward_batch_size,
+            amp_enabled=amp_enabled,
+        )
+        comparison = {
+            "source_classifier_without_target_adaptation": source_metrics,
+            "few_shot_adapted_protonet": adapted_metrics,
+            "delta": _metric_delta(adapted_metrics, source_metrics),
+            "target_test_used_for_training": False,
+            "target_test_used_for_model_selection": False,
+        }
+        (args.output_dir / "comparison.json").write_text(
+            json.dumps(comparison, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        log("Held-out target test evaluation:\n" + json.dumps(comparison, indent=2))
+        return
 
     encoder_parameters = [
         parameter for parameter in model.encoder.parameters() if parameter.requires_grad
@@ -476,11 +615,37 @@ def run(args: argparse.Namespace) -> None:
     scaler = create_scaler(amp_enabled)
     sampler = FixedSupportEpisodeSampler(support_frame, args.seed)
     history_path = args.output_dir / "history.jsonl"
+    start_epoch = 0
+    best_support_loss = math.inf
+    stale_epochs = 0
+    if resume_state is not None:
+        required = {"optimizer", "epoch", "best_support_loss", "stale_epochs"}
+        missing = required.difference(resume_state)
+        if missing:
+            raise ValueError(f"Resume checkpoint missing state: {sorted(missing)}")
+        optimizer.load_state_dict(resume_state["optimizer"])
+        if resume_state.get("scaler"):
+            scaler.load_state_dict(resume_state["scaler"])
+        if resume_state.get("sampler_state") is not None:
+            sampler.rng.setstate(resume_state["sampler_state"])
+        start_epoch = int(resume_state["epoch"]) + 1
+        best_support_loss = float(resume_state["best_support_loss"])
+        stale_epochs = int(resume_state["stale_epochs"])
+        log(
+            f"Resume restored: next_epoch={start_epoch + 1}/{args.epochs}, "
+            f"best_support_loss={best_support_loss:.6f}, "
+            f"patience={stale_epochs}/{args.patience}."
+        )
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
+        epoch_started = time.perf_counter()
         model.train()
         losses: List[float] = []
-        for _ in tqdm(range(args.train_episodes), desc="target-support-adapt", leave=False):
+        for _ in tqdm(
+            range(args.train_episodes),
+            desc=f"few-shot epoch {epoch + 1}/{args.epochs}",
+            leave=True,
+        ):
             optimizer.zero_grad(set_to_none=True)
             loss = run_episode(
                 model,
@@ -495,47 +660,63 @@ def run(args: argparse.Namespace) -> None:
             scaler.step(optimizer)
             scaler.update()
             losses.append(float(loss.detach()))
+        support_loss = sum(losses) / len(losses)
+        improved = support_loss < best_support_loss
+        if improved:
+            best_support_loss = support_loss
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
         record = {
             "epoch": epoch,
-            "support_episode_loss": sum(losses) / len(losses),
+            "support_episode_loss": support_loss,
+            "best_support_loss": best_support_loss,
+            "improved": improved,
+            "stale_epochs": stale_epochs,
             "unique_labeled_target_images": len(support_frame),
             "target_test_evaluated": False,
         }
-        print(json.dumps(record, ensure_ascii=False))
+        log(
+            f"Epoch {epoch + 1}/{args.epochs} complete in "
+            f"{time.perf_counter() - epoch_started:.1f}s: "
+            + json.dumps(record, ensure_ascii=False)
+        )
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        prototypes, class_ids = compute_prototypes(
+            model, eval_support_dataset, device
+        )
+        checkpoint_kwargs = {
+            "epoch": epoch,
+            "best_support_loss": best_support_loss,
+            "stale_epochs": stale_epochs,
+            "optimizer": optimizer,
+            "scaler": scaler,
+            "sampler_state": sampler.rng.getstate(),
+        }
+        save_adapted_checkpoint(
+            args.output_dir / "checkpoint-last.pth",
+            model,
+            prototypes,
+            class_ids,
+            args,
+            saved_args,
+            **checkpoint_kwargs,
+        )
+        if improved:
+            save_adapted_checkpoint(
+                args.output_dir / "checkpoint-best.pth",
+                model,
+                prototypes,
+                class_ids,
+                args,
+                saved_args,
+                **checkpoint_kwargs,
+            )
+        if stale_epochs >= args.patience:
+            log(f"Early stopping: no support-loss improvement for {stale_epochs} epochs.")
+            break
 
-    after_metrics, prototypes, class_ids = evaluate_protonet(
-        model,
-        eval_support_dataset,
-        target_test_dataset,
-        device,
-        batch_size=args.forward_batch_size,
-        amp_enabled=amp_enabled,
-    )
-    save_adapted_checkpoint(
-        args.output_dir / "checkpoint-adapted-protonet.pth",
-        model,
-        prototypes,
-        class_ids,
-        args,
-        saved_args,
-    )
-
-    comparison = {
-        "source_classifier_without_target_adaptation": source_metrics,
-        "prototype_before_gradient_adaptation": before_metrics,
-        "prototype_after_gradient_adaptation": after_metrics,
-        "adaptation_delta_vs_prototype_before": _metric_delta(after_metrics, before_metrics),
-        "adaptation_delta_vs_source_classifier": _metric_delta(after_metrics, source_metrics),
-    }
-    with (args.output_dir / "comparison.json").open("w", encoding="utf-8") as handle:
-        json.dump(comparison, handle, indent=2, ensure_ascii=False)
-
-    qwk_delta = float(after_metrics["qwk"]) - float(before_metrics["qwk"])
-    qwk_delta_vs_source = float(after_metrics["qwk"]) - float(source_metrics["qwk"])
-    if not math.isfinite(qwk_delta) or not math.isfinite(qwk_delta_vs_source):
-        raise RuntimeError("Target evaluation produced a non-finite QWK delta")
     summary = {
         "method": "fixed_support_target_domain_protonet",
         "shots_per_class": args.shots,
@@ -544,23 +725,30 @@ def run(args: argparse.Namespace) -> None:
         "target_validation_used": False,
         "target_test_used_for_training": False,
         "target_test_used_for_model_selection": False,
-        "target_test_evaluated_only_before_and_after": True,
+        "target_test_evaluated_during_training": False,
         "requires_support_set_at_inference": False,
-        "adapted_checkpoint": "checkpoint-adapted-protonet.pth",
-        "source_classifier_qwk": float(source_metrics["qwk"]),
-        "qwk_before_adaptation": float(before_metrics["qwk"]),
-        "qwk_after_adaptation": float(after_metrics["qwk"]),
-        "qwk_delta": qwk_delta,
-        "qwk_delta_vs_source_classifier": qwk_delta_vs_source,
-        "adapted_beats_source_on_this_run": qwk_delta_vs_source > 0.0,
+        "best_support_loss": best_support_loss,
+        "best_checkpoint": "checkpoint-best.pth",
+        "last_checkpoint": "checkpoint-last.pth",
+        "selection_signal": "fixed-support episodic loss",
     }
     with (args.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    log(
+        f"Few-shot training finished in {time.perf_counter() - run_started:.1f}s.\n"
+        + json.dumps(summary, indent=2, ensure_ascii=False)
+    )
 
 
 def main() -> None:
-    run(parse_args())
+    try:
+        run(parse_args())
+    except KeyboardInterrupt:
+        log(
+            "Training interrupted. checkpoint-last.pth from the most recent "
+            "completed epoch remains safe; rerun with --resume."
+        )
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":
