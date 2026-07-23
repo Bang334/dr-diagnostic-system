@@ -45,11 +45,11 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from tqdm.auto import tqdm
 
-from ai.preprocessing.fundus_prep import preprocess_fundus_array
+from ai.grading.preprocessing import PREPROCESSING_RECIPES, PreprocessingSpec, preprocess_fundus
+from ai.grading.taxonomy import CLASS_NAMES, NUM_CLASSES
+from ai.grading.backbones import BACKBONE_PRESETS
 
 
-NUM_CLASSES = 5
-CLASS_NAMES = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -90,8 +90,14 @@ def parse_args() -> argparse.Namespace:
         help="Hugging Face checkpoint under YukunZhou/<id>",
     )
     parser.add_argument(
+        "--architecture",
+        choices=tuple(BACKBONE_PRESETS),
+        default="convnext",
+        help="Auditable backbone family; --model-name may override its preset",
+    )
+    parser.add_argument(
         "--model-name",
-        default="convnext_tiny.fb_in22k_ft_in1k",
+        default=None,
         help="timm model used when --model-source=timm",
     )
     parser.add_argument("--image-size", type=int, default=224)
@@ -128,7 +134,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Evaluate --resume checkpoint on the test split without training",
     )
-    parser.add_argument("--enhance", action="store_true")
+    parser.add_argument(
+        "--preprocessing",
+        choices=PREPROCESSING_RECIPES,
+        default="rgb_crop",
+        help="Fundus preprocessing recipe stored with the checkpoint",
+    )
+    parser.add_argument("--enhance", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-amp", action="store_true")
     return parser.parse_args()
 
@@ -366,10 +378,12 @@ class FundusDataset(Dataset):
         image_bgr = cv2.imread(os.fspath(path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             raise FileNotFoundError(f"Could not read image: {path}")
-        image_bgr = preprocess_fundus_array(
+        recipe = getattr(self.args, "preprocessing", "rgb_crop")
+        if getattr(self.args, "enhance", False) and recipe == "rgb_crop":
+            recipe = "ben_graham"
+        image_bgr = preprocess_fundus(
             image_bgr,
-            self.args.image_size,
-            enhance=self.args.enhance,
+            PreprocessingSpec(recipe=recipe, image_size=self.args.image_size),
         )
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         image = self.transform(Image.fromarray(image_rgb))
@@ -501,8 +515,9 @@ def build_model(args: argparse.Namespace) -> nn.Module:
     output_dim = NUM_CLASSES if args.loss == "ce" else NUM_CLASSES - 1
     if args.model_source == "retfound":
         return load_retfound_dinov2(args, output_dim)
-    print(f"Loading timm pretrained model {args.model_name}")
-    return timm.create_model(args.model_name, pretrained=True, num_classes=output_dim)
+    model_name = args.model_name or BACKBONE_PRESETS[args.architecture]
+    print(f"Loading {args.architecture} backbone via timm model {model_name}")
+    return timm.create_model(model_name, pretrained=True, num_classes=output_dim)
 
 
 def is_head_parameter(name: str) -> bool:
@@ -693,6 +708,21 @@ def save_checkpoint(
         "stale_epochs": stale_epochs,
         "freeze_backbone": freeze_backbone,
         "args": vars(args),
+        "grading_contract": {
+            "schema_version": 1,
+            "standard": "ICDR",
+            "etdrs_correspondence": True,
+            "class_names": CLASS_NAMES,
+            "preprocessing": PreprocessingSpec(
+                recipe=(
+                    "ben_graham"
+                    if getattr(args, "enhance", False)
+                    and getattr(args, "preprocessing", "rgb_crop") == "rgb_crop"
+                    else getattr(args, "preprocessing", "rgb_crop")
+                ),
+                image_size=args.image_size,
+            ).to_dict(),
+        },
     }
     if include_training_state:
         state.update(

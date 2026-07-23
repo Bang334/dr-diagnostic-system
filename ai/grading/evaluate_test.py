@@ -16,6 +16,8 @@ from pathlib import Path
 
 import torch
 
+from ai.grading.backbones import BACKBONE_PRESETS
+
 from ai.grading.train import (
     NUM_CLASSES,
     CLASS_NAMES,
@@ -156,7 +158,8 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device):
         )
     else:
         model = timm.create_model(
-            saved_args.model_name,
+            saved_args.model_name
+            or BACKBONE_PRESETS[getattr(saved_args, "architecture", "convnext")],
             pretrained=False,
             num_classes=output_dim,
         )
@@ -190,7 +193,9 @@ def main() -> None:
     model, saved_args = load_checkpoint(args.checkpoint, device)
 
     # Patch một số field cần thiết từ args người dùng truyền vào
-    saved_args.enhance = False
+    # Preserve the exact preprocessing stored in the training checkpoint.
+    saved_args.enhance = getattr(saved_args, "enhance", False)
+    saved_args.preprocessing = getattr(saved_args, "preprocessing", "rgb_crop")
     saved_args.image_size = getattr(saved_args, "image_size", 224)
 
     # Build test dataset

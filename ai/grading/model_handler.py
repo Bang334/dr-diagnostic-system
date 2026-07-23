@@ -2,15 +2,9 @@ import os
 import numpy as np
 import tensorflow as tf
 
-# Mapping classes dựa trên thang chuẩn ICDR
-CLASS_NAMES = [
-    "No DR",
-    "Mild NPDR",
-    "Moderate NPDR",
-    "Severe NPDR",
-    "Proliferative DR"
-]
+from ai.grading.taxonomy import CLASS_NAMES
 
+# Mapping classes dựa trên thang chuẩn ICDR
 class DRModelHandler:
     def __init__(self, model_path: str):
         """

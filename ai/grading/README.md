@@ -19,6 +19,12 @@ split_dataset/
 Grades are `0=No DR`, `1=Mild`, `2=Moderate`, `3=Severe`, and
 `4=Proliferative DR`.
 
+The canonical definitions live in `taxonomy.py`. They follow the five-level
+ICDR scale and expose the corresponding ETDRS levels (`10`, `20`,
+`35/43/47`, `53`, and `61-85`) in every inference response. This is a grading
+correspondence, not a claim that one-field fundus inference reproduces a full
+ETDRS photographic reading protocol.
+
 ## Colab setup
 
 Use the supplied `DR_Training_Colab.ipynb`. It checks out
@@ -112,9 +118,42 @@ python -m ai.grading.train \
 The legacy `--images-dir` plus `--labels-csv` input remains supported for older
 APTOS experiments, but it cannot be combined with `--dataset-dir`.
 
+## Required architecture comparison
+
+The auditable presets are EfficientNet-B3, ResNet-50 and ConvNeXt-Tiny. Run all
+three with the same data split, seed and preprocessing, then generate
+`backbone_comparison.csv`:
+
+```bash
+python -m ai.grading.benchmark_backbones \
+  --dataset-dir /content/fundus_merged/split_dataset \
+  --output-dir /content/drive/MyDrive/dr_runs/backbone_benchmark \
+  --preprocessing rgb_crop \
+  --seed 42
+```
+
+Each run is selected by validation QWK and evaluated once on the held-out test
+split. Do not claim that one architecture is superior until all three result
+files were produced by this controlled command.
+
 ## Preprocessing contract
 
-Training and the current Keras API share the colour-preserving crop in
-`ai.preprocessing.fundus_prep`. The default is crop + resize with RGB retained.
-If an experiment is trained with `--enhance`, deploy it with
-`DR_PREPROCESS_ENHANCE=1`; otherwise leave that variable unset.
+`preprocessing.py` owns four deterministic recipes: colour-preserving fundus
+crop (`rgb_crop`), green-channel extraction (`green`), green-channel CLAHE
+(`clahe`) and Ben Graham enhancement (`ben_graham`). Select one with
+`--preprocessing`; its complete specification is stored in the checkpoint and
+reused automatically for test and PyTorch deployment.
+
+`predictor.py` is the single inference interface. `load_predictor()` selects a
+Keras adapter for `.keras`/`.h5` or a PyTorch adapter for `.pth`/`.pt`; callers
+always receive the same five-grade ICDR/ETDRS response contract.
+
+For a legacy Keras checkpoint, optional metadata can be placed beside the model
+as `<model-name>.keras.json`, for example:
+
+```json
+{"preprocessing": {"recipe": "ben_graham", "image_size": 300}}
+```
+
+PyTorch checkpoints need no sidecar because training writes the grading
+contract, class order and full preprocessing specification into the checkpoint.

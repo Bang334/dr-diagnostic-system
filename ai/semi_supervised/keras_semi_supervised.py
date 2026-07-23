@@ -23,6 +23,7 @@ from ai.preprocessing.fundus_prep import preprocess_rgb_crop_512_from_bgr
 from ai.semi_supervised.keras_pseudo_labels import (
     select_pseudo_labels,
 )
+from ai.semi_supervised.progress import ProgressReporter
 
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -51,6 +52,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--max-unlabeled-images", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every-batches", type=int, default=25)
+    parser.add_argument("--pseudo-log-every-images", type=int, default=10)
+    parser.add_argument("--phase-heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--no-tta", action="store_true")
     parser.add_argument(
         "--resume",
@@ -71,6 +74,21 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("pseudo-label limits cannot be negative")
     if args.log_every_batches < 1:
         raise ValueError("log-every-batches must be positive")
+    if args.pseudo_log_every_images < 1:
+        raise ValueError("pseudo-log-every-images must be positive")
+    if args.phase_heartbeat_seconds <= 0:
+        raise ValueError("phase-heartbeat-seconds must be positive")
+
+
+def run_logged_phase(reporter: ProgressReporter, operation, *, detail: str = ""):
+    reporter.start(detail=detail)
+    try:
+        result = operation()
+    except BaseException as error:
+        reporter.fail(error)
+        raise
+    reporter.complete()
+    return result
 
 
 def discover_images(root: Path) -> list[Path]:
@@ -365,13 +383,40 @@ def main(argv=None) -> None:
     if output_dir.exists() and any(output_dir.iterdir()) and not args.resume:
         raise FileExistsError(f"Output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = output_dir / "progress.jsonl"
 
+    def reporter(phase: str, total: int | None = None, every_items: int = 10):
+        return ProgressReporter(
+            phase,
+            total=total,
+            log_path=progress_path,
+            every_items=every_items,
+            heartbeat_seconds=args.phase_heartbeat_seconds,
+        )
+
+    print("\n" + "=" * 90, flush=True)
+    print("SEMI-SUPERVISED PIPELINE START", flush=True)
+    print(f"Output directory : {output_dir}", flush=True)
+    print(f"Progress log     : {progress_path}", flush=True)
+    print(f"Heartbeat        : every {args.phase_heartbeat_seconds:.1f}s", flush=True)
+    print(f"CLI arguments    : {json.dumps(vars(args), ensure_ascii=False, default=str)}", flush=True)
+    print("=" * 90, flush=True)
+
+    tensorflow_phase = reporter("tensorflow-import")
+    tensorflow_phase.start(detail="importing TensorFlow and probing devices")
     try:
         import tensorflow as tf
     except ImportError as exc:
+        tensorflow_phase.fail(exc)
         raise RuntimeError(
             "TensorFlow is required; install requirements-keras.txt first"
         ) from exc
+    except BaseException as error:
+        tensorflow_phase.fail(error)
+        raise
+    tensorflow_phase.complete(
+        detail=f"tensorflow={tf.__version__}; GPUs={tf.config.list_physical_devices('GPU')}"
+    )
     from ai.keras_grading.custom_objects import (
         CohenKappaMetric,
         OrdinalAccuracy,
@@ -380,9 +425,29 @@ def main(argv=None) -> None:
     )
 
     tf.keras.utils.set_random_seed(args.seed)
-    splits = find_splits(args.dataset_dir)
-    frames = {name: scan_labeled_split(path) for name, path in splits.items()}
-    unlabeled = discover_images(args.unlabeled_dir)
+    discovery_phase = reporter("dataset-discovery")
+    discovery_phase.start(detail="locating fixed splits and scanning image paths")
+    try:
+        splits = find_splits(args.dataset_dir)
+        frames = {}
+        for index, (name, path) in enumerate(splits.items(), 1):
+            print(f"[dataset-discovery] scanning split={name} path={path}", flush=True)
+            frames[name] = scan_labeled_split(path)
+            discovery_phase.advance(
+                index,
+                detail=f"split={name}; images={len(frames[name]):,}",
+            )
+        print(f"[dataset-discovery] scanning unlabeled root={args.unlabeled_dir}", flush=True)
+        unlabeled = discover_images(args.unlabeled_dir)
+    except BaseException as error:
+        discovery_phase.fail(error)
+        raise
+    discovery_phase.complete(
+        detail=(
+            f"train={len(frames['train']):,}; val={len(frames['val']):,}; "
+            f"test={len(frames['test']):,}; unlabeled={len(unlabeled):,}"
+        )
+    )
     if args.max_unlabeled_images:
         rng = np.random.default_rng(args.seed)
         indices = np.sort(
@@ -393,12 +458,25 @@ def main(argv=None) -> None:
             )
         )
         unlabeled = [unlabeled[int(index)] for index in indices]
-    assert_external(unlabeled, frames)
+    overlap_phase = reporter("external-data-audit")
+    run_logged_phase(
+        overlap_phase,
+        lambda: assert_external(unlabeled, frames),
+        detail=(
+            f"checking {len(unlabeled):,} unlabeled against "
+            f"{sum(len(frame) for frame in frames.values()):,} fixed-split images"
+        ),
+    )
 
-    grader = KerasOrdinalGrader(
-        args.model,
-        threshold_path=args.thresholds,
-        use_tta=not args.no_tta,
+    model_phase = reporter("keras-model-load")
+    grader = run_logged_phase(
+        model_phase,
+        lambda: KerasOrdinalGrader(
+            args.model,
+            threshold_path=args.thresholds,
+            use_tta=not args.no_tta,
+        ),
+        detail=f"model={args.model}; TTA={not args.no_tta}",
     )
     pseudo_path = output_dir / "pseudo_labels.csv"
     pseudo_cache_path = output_dir / "pseudo-cache.json"
@@ -406,7 +484,12 @@ def main(argv=None) -> None:
     labeled = frames["train"].copy()
     labeled["sample_weight"] = 1.0
     labeled["source"] = "labeled"
-    cache_signature = pseudo_cache_signature(args, grader, unlabeled)
+    signature_phase = reporter("pseudo-cache-signature")
+    cache_signature = run_logged_phase(
+        signature_phase,
+        lambda: pseudo_cache_signature(args, grader, unlabeled),
+        detail=f"inventorying {len(unlabeled):,} unlabeled paths",
+    )
     pseudo_frame = read_matching_pseudo_cache(
         pseudo_cache_path, pseudo_path, cache_signature
     )
@@ -426,10 +509,30 @@ def main(argv=None) -> None:
                 flush=True,
             )
         predictions = []
+        inference_phase = reporter(
+            "pseudo-label-inference",
+            total=len(unlabeled),
+            every_items=args.pseudo_log_every_images,
+        )
+        inference_phase.start(
+            detail=(
+                f"TTA={not args.no_tta}; first prediction includes TensorFlow warm-up; "
+                f"logging every {args.pseudo_log_every_images} images"
+            )
+        )
         for index, path in enumerate(unlabeled, 1):
-            predictions.append((path, grader.predict_path(path)))
-            if index == 1 or index % 100 == 0 or index == len(unlabeled):
-                print(f"Pseudo-label inference {index}/{len(unlabeled)}", flush=True)
+            if index == 1 or index % args.pseudo_log_every_images == 0:
+                print(
+                    f"[pseudo-label-inference] START image {index}/{len(unlabeled)}: {path}",
+                    flush=True,
+                )
+            try:
+                predictions.append((path, grader.predict_path(path)))
+            except BaseException as error:
+                inference_phase.fail(error)
+                raise
+            inference_phase.advance(index, detail=f"last_image={path.name}")
+        inference_phase.complete(detail=f"predictions={len(predictions):,}")
         pseudo = select_pseudo_labels(
             predictions,
             minimum_confidence=args.pseudo_confidence,

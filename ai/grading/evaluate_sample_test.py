@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from ai.grading.backbones import BACKBONE_PRESETS
+
 # Ensure stdout is flushed immediately for subprocess environments
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -101,7 +103,8 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> tuple[nn.Mod
         )
     else:
         model = timm.create_model(
-            saved_args.model_name,
+            saved_args.model_name
+            or BACKBONE_PRESETS[getattr(saved_args, "architecture", "convnext")],
             pretrained=False,
             num_classes=output_dim,
         )
@@ -208,6 +211,7 @@ def main() -> None:
 
     # Ensure metadata configuration matches training setup
     saved_args.enhance = getattr(saved_args, "enhance", False)
+    saved_args.preprocessing = getattr(saved_args, "preprocessing", "rgb_crop")
     saved_args.image_size = getattr(saved_args, "image_size", 224)
 
     # Get test data subset

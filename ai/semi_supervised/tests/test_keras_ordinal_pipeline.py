@@ -29,6 +29,32 @@ from ai.semi_supervised.keras_semi_supervised import (
     pseudo_cache_signature,
     read_matching_pseudo_cache,
 )
+import ai.semi_supervised.keras_semi_supervised as semi_training
+
+
+class ProgressReportingTests(unittest.TestCase):
+    def test_long_phase_emits_start_progress_and_completion(self):
+        output = io.StringIO()
+        clock_values = iter([100.0, 105.0, 110.0, 115.0])
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with contextlib.redirect_stdout(output):
+                reporter = semi_training.ProgressReporter(
+                    "pseudo-label-inference",
+                    total=10,
+                    log_path=Path(temporary_dir) / "progress.jsonl",
+                    every_items=2,
+                    clock=lambda: next(clock_values),
+                )
+                reporter.start(detail="warming up model")
+                reporter.advance(1)
+                reporter.advance(2)
+                reporter.complete(detail="selected=2")
+        text = output.getvalue()
+        self.assertIn("PHASE START", text)
+        self.assertIn("warming up model", text)
+        self.assertIn("2/10", text)
+        self.assertIn("ETA", text)
+        self.assertIn("PHASE COMPLETE", text)
 
 
 class OrdinalDecodingTests(unittest.TestCase):
