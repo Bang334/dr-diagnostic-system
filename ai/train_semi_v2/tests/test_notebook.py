@@ -51,6 +51,12 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("KeyboardInterrupt", self.source)
         self.assertIn("checkpoint-last.pth của epoch hoàn tất gần nhất", self.source)
 
+    def test_fresh_run_log_does_not_make_output_directory_nonempty(self):
+        self.assertIn("is_fresh_run = '--resume' not in command", self.source)
+        self.assertIn("DRIVE_ROOT / f'{RUN_NAME}-{log_name}'", self.source)
+        self.assertIn("legacy_log.replace(external_log)", self.source)
+        self.assertNotIn("OUTPUT_DIR.mkdir(parents=True, exist_ok=True)", self.source)
+
     def test_does_not_embed_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)
