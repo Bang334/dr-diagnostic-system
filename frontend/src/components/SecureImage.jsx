@@ -88,7 +88,7 @@ export default function SecureImage({ src, alt, style, className }) {
     <img 
       src={blobUrl} 
       alt={alt} 
-      style={{ ...style, objectFit: 'cover' }} 
+      style={{ objectFit: 'contain', ...style }} 
       className={className} 
     />
   );

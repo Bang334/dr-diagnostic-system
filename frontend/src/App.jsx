@@ -27,7 +27,9 @@ import {
   Target,
   CalendarPlus,
   BookOpenCheck,
-  Eye
+  Eye,
+  Maximize2,
+  ZoomIn
 } from 'lucide-react';
 import { colors } from './theme/colors';
 import { api } from './services/api';
@@ -228,6 +230,7 @@ function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [showMasks, setShowMasks] = useState({ left_eye: false, right_eye: false });
+  const [lightboxImage, setLightboxImage] = useState(null);
   const [currentScreeningDetail, setCurrentScreeningDetail] = useState(null);
   const [summarySource, setSummarySource] = useState('ai');
 
@@ -1003,20 +1006,48 @@ function App() {
 
                         {/* Image Preview & AI Overlay Toggle */}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
-                          <button 
-                            className="btn btn-secondary" 
-                            style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px', alignSelf: 'flex-start', border: '1px solid var(--border-light)' }}
-                            onClick={() => setShowMasks(prev => ({ ...prev, [key]: !prev[key] }))}
-                          >
-                            <Eye size={12} /> {showMasks[key] ? 'Xem ảnh võng mạc gốc' : 'Xem bản đồ tổn thương AI'}
-                          </button>
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <button 
+                              className="btn btn-secondary" 
+                              style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px', border: '1px solid var(--border-light)' }}
+                              onClick={() => setShowMasks(prev => ({ ...prev, [key]: !prev[key] }))}
+                            >
+                              <Eye size={12} /> {showMasks[key] ? 'Xem ảnh võng mạc gốc' : 'Xem bản đồ tổn thương AI'}
+                            </button>
+                            <button 
+                              className="btn btn-secondary" 
+                              style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px', border: '1px solid var(--border-light)', color: 'var(--primary)', fontWeight: '600' }}
+                              onClick={() => setLightboxImage({
+                                src: showMasks[key] && eye.segmentation?.lesion_mask_url ? eye.segmentation.lesion_mask_url : eye.image_url,
+                                originalSrc: eye.image_url,
+                                maskSrc: eye.segmentation?.lesion_mask_url,
+                                title: `${label} - Grade ${grade} (${colors.drGrades[grade].label})`,
+                                isMask: showMasks[key]
+                              })}
+                            >
+                              <Maximize2 size={12} /> Phóng to xem siêu rõ
+                            </button>
+                          </div>
                           
-                          <div style={{ position: 'relative', width: '100%', height: '220px', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-light)', backgroundColor: '#000' }}>
+                          <div 
+                            onClick={() => setLightboxImage({
+                              src: showMasks[key] && eye.segmentation?.lesion_mask_url ? eye.segmentation.lesion_mask_url : eye.image_url,
+                              originalSrc: eye.image_url,
+                              maskSrc: eye.segmentation?.lesion_mask_url,
+                              title: `${label} - Grade ${grade} (${colors.drGrades[grade].label})`,
+                              isMask: showMasks[key]
+                            })}
+                            style={{ position: 'relative', width: '100%', height: '340px', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-light)', backgroundColor: '#000', cursor: 'zoom-in' }}
+                            title="Nhấp để phóng to xem ảnh toàn màn hình"
+                          >
                             <SecureImage 
                               src={showMasks[key] && eye.segmentation?.lesion_mask_url ? eye.segmentation.lesion_mask_url : eye.image_url} 
                               alt={`${label} image`}
-                              style={{ width: '100%', height: '100%' }}
+                              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                             />
+                            <div style={{ position: 'absolute', bottom: '8px', right: '8px', backgroundColor: 'rgba(0,0,0,0.7)', color: '#fff', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px', backdropFilter: 'blur(4px)', fontWeight: '500' }}>
+                              <ZoomIn size={12} /> Nhấp để phóng to
+                            </div>
                           </div>
                         </div>
 
@@ -1449,7 +1480,105 @@ function App() {
             && (currentUser.hospital_department || '').toLocaleLowerCase('vi-VN').includes('nhãn')
           )
         }
-      />
+      {/* Fullscreen Image Lightbox Modal */}
+      {lightboxImage && (
+        <div 
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.92)',
+            zIndex: 99999,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+            backdropFilter: 'blur(8px)',
+            animation: 'fadeIn 0.2s ease'
+          }}
+          onClick={() => setLightboxImage(null)}
+        >
+          {/* Lightbox Header */}
+          <div 
+            style={{
+              width: '100%',
+              maxWidth: '1300px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '16px',
+              color: '#fff',
+              zIndex: 100000
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
+              <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '600', color: '#fff' }}>
+                {lightboxImage.title}
+              </h3>
+              {lightboxImage.maskSrc && (
+                <span className="badge" style={{ backgroundColor: lightboxImage.isMask ? '#EF4444' : '#10B981', color: '#fff', fontSize: '12px', padding: '5px 12px', fontWeight: '600' }}>
+                  {lightboxImage.isMask ? '🔴 Bản đồ tổn thương AI (MA / HE / EX)' : '👁️ Ảnh võng mạc gốc'}
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              {lightboxImage.maskSrc && (
+                <button
+                  className="btn btn-secondary"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.18)', color: '#fff', border: '1px solid rgba(255,255,255,0.35)', padding: '8px 16px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '600', borderRadius: '8px' }}
+                  onClick={() => setLightboxImage(prev => ({
+                    ...prev,
+                    isMask: !prev.isMask,
+                    src: !prev.isMask ? prev.maskSrc : prev.originalSrc
+                  }))}
+                >
+                  <Eye size={15} /> {lightboxImage.isMask ? 'Chuyển sang Ảnh gốc' : 'Chuyển sang Mask AI'}
+                </button>
+              )}
+              <button
+                style={{ backgroundColor: 'rgba(255,255,255,0.25)', border: 'none', color: '#fff', borderRadius: '50%', width: '40px', height: '40px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                onClick={() => setLightboxImage(null)}
+                title="Đóng (ESC)"
+              >
+                <X size={24} />
+              </button>
+            </div>
+          </div>
+
+          {/* Lightbox Main Viewport */}
+          <div 
+            style={{
+              position: 'relative',
+              maxWidth: '92vw',
+              maxHeight: '80vh',
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+              backgroundColor: '#050505',
+              borderRadius: '12px',
+              border: '1px solid rgba(255,255,255,0.1)',
+              boxShadow: '0 25px 60px rgba(0,0,0,0.9)'
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <SecureImage 
+              src={lightboxImage.src} 
+              alt={lightboxImage.title}
+              style={{ maxWidth: '100%', maxHeight: '80vh', width: 'auto', height: 'auto', objectFit: 'contain', display: 'block' }}
+            />
+          </div>
+
+          {/* Lightbox Sub-Caption & Tip */}
+          <div style={{ marginTop: '14px', color: 'rgba(255,255,255,0.75)', fontSize: '13px', textAlign: 'center', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <ZoomIn size={14} /> Bác sĩ có thể nhấp <strong>Chuyển đổi Mask AI</strong> ở góc phải để đối chiếu trực tiếp tổn thương với ảnh võng mạc gốc.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
