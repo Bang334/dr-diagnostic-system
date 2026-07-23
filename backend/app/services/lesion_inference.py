@@ -246,6 +246,7 @@ class LesionInferenceService:
         ckpt_ex: str | os.PathLike,
         upload_dir: str | os.PathLike,
         device: str = "auto",
+        use_tta: bool = False,
     ) -> None:
         self.ckpt_paths = {
             "MA": Path(ckpt_ma).expanduser().resolve(),
@@ -255,6 +256,7 @@ class LesionInferenceService:
         self.upload_dir = Path(upload_dir).expanduser().resolve()
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.requested_device = device.strip().lower() or "auto"
+        self.use_tta = use_tta
         self._models: dict[str, Any] = {}
         self._device: Any = None
         self._torch: Any = None
@@ -273,15 +275,35 @@ class LesionInferenceService:
         """
         Thêm thư mục segmentation_lesion_v1 vào sys.path để import
         các module RetinalLesionLightningModule, RetinalConfig, get_segmentation_model.
+        Hỗ trợ tìm kiếm linh hoạt ở nhiều ổ đĩa (F:, D:, C:, hoặc nội hàm backend).
         """
-        # Tìm đường dẫn tương đối từ vị trí file này
         this_file = Path(__file__).resolve()
-        # Đường dẫn: backend/app/services/lesion_inference.py → lên 3 cấp → dr-diagnostic-system
-        # segmentation_lesion_v1 nằm cùng cấp với dr-diagnostic-system
-        project_root = this_file.parents[3]  # D:\dr-diagnostic-system
-        seg_path = project_root.parent / "segmentation_lesion_v1"
-        if seg_path.exists() and str(seg_path) not in sys.path:
-            sys.path.insert(0, str(seg_path))
+        # this_file: backend/app/services/lesion_inference.py
+        # parents[0] = services, parents[1] = app, parents[2] = backend, parents[3] = dr-diagnostic-system
+        backend_dir = this_file.parents[2]
+        project_root = this_file.parents[3]
+
+        candidate_paths = [
+            project_root / "ai" / "segmentation",
+            backend_dir / "segmentation_lesion_v1",
+            Path("F:/segmentation_lesion_v1"),
+            Path("F:/segmentation_lesion_v1/segmentation_lesion_v1"),
+            project_root / "segmentation_lesion_v1",
+            project_root.parent / "segmentation_lesion_v1",
+            Path("D:/segmentation_lesion_v1"),
+            Path("C:/segmentation_lesion_v1"),
+        ]
+
+        env_path = os.getenv("SEGMENTATION_LESION_PATH")
+        if env_path:
+            candidate_paths.insert(0, Path(env_path).expanduser().resolve())
+
+        for candidate in candidate_paths:
+            if candidate.exists() and (candidate / "configs" / "config.py").exists():
+                path_str = str(candidate)
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+                return
 
     def load(self) -> None:
         """Nạp 3 checkpoint vào bộ nhớ (thread-safe, chỉ nạp 1 lần)."""
@@ -347,16 +369,8 @@ class LesionInferenceService:
 
     def predict(self, image_bytes: bytes) -> dict[str, Any]:
         """
-        Pipeline suy luận đầy đủ cho 1 ảnh võng mạc.
-
-        Returns dict khớp với SegmentationResult schema của hệ thống:
-        {
-          "lesions": [{"key": "microaneurysm", "label": ..., "detected": bool,
-                       "area_pct": float, "confidence": float}, ...],
-          "lesion_mask_url": "/uploads/seg-overlay-<uuid>.png",
-          "model_version": str,
-          "status": "ok"
-        }
+        Pipeline suy luận tối ưu tốc độ cho 1 ảnh võng mạc.
+        Hỗ trợ TTA toggle và suy luận song song 3 mô hình (MA, HE, EX).
         """
         self.load()
 
@@ -371,33 +385,35 @@ class LesionInferenceService:
         roi_bgr, (ym, yM, xm, xM) = _extract_roi(raw_bgr)
 
         binary_masks: dict[str, np.ndarray] = {}
-        lesion_results = []
+        lesion_results_dict: dict[str, dict[str, Any]] = {}
 
-        # ── 3. Suy luận từng model MA / HE / EX ─────────────────────────────
-        for lesion_type, (model, config) in self._models.items():
-            # 3a. Letterboxing để giữ tỷ lệ khung hình → không bóp méo hình học
+        # ── 3. Suy luận song song 3 model MA / HE / EX qua ThreadPoolExecutor ──
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _infer_lesion(item: tuple[str, Any]):
+            lesion_type, (model, config) = item
             lb_img, lb_meta = _letterbox(roi_bgr, target_size=max(roi_bgr.shape[:2]))
-
-            # 3b. CLAHE Green channel → float32 [0,1]
             img_float = _clahe_green_channel(lb_img)
 
-            # 3c. Sliding Window + TTA → xác suất (H_lb, W_lb)
-            prob_map = _predict_with_tta(
-                model, img_float, self._device,
-                patch_size=config.patch_size,
-                stride=config.stride,
-            )
+            if self.use_tta:
+                prob_map = _predict_with_tta(
+                    model, img_float, self._device,
+                    patch_size=config.patch_size,
+                    stride=config.stride,
+                )
+            else:
+                prob_map = _sliding_window_predict(
+                    model, img_float, self._device,
+                    patch_size=config.patch_size,
+                    stride=config.stride,
+                )
 
-            # 3d. Crop lại phần không padding từ letterbox
             pt, pl = lb_meta["pad_top"], lb_meta["pad_left"]
             nh, nw = lb_meta["new_h"], lb_meta["new_w"]
             prob_map = prob_map[pt:pt + nh, pl:pl + nw]
-
-            # 3e. Resize prob_map về kích thước ROI gốc
             prob_map = cv2.resize(prob_map, (roi_bgr.shape[1], roi_bgr.shape[0]),
                                   interpolation=cv2.INTER_LINEAR)
 
-            # 3f. Post-processing (threshold + morphology + OD mask)
             binary_roi = _post_process(
                 prob_map,
                 threshold=config.threshold,
@@ -406,13 +422,9 @@ class LesionInferenceService:
                 use_od_mask=config.use_optic_disc_mask,
             )
 
-            # 3g. Stitch mask ROI ngược về kích thước ảnh gốc
             binary_full = np.zeros((orig_h, orig_w), dtype=np.uint8)
             binary_full[ym:yM, xm:xM] = binary_roi
 
-            binary_masks[lesion_type] = binary_full
-
-            # ── 4. Tính thống kê ─────────────────────────────────────────────
             detected = bool(binary_full.any())
             retinal_pixels = np.count_nonzero(
                 cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2GRAY) > 10
@@ -421,14 +433,29 @@ class LesionInferenceService:
             area_pct = round(lesion_pixels / max(retinal_pixels, 1), 6)
 
             key_map = {"MA": "microaneurysm", "HE": "hemorrhage", "EX": "hard_exudate"}
-            label_map = LESION_META
-            lesion_results.append({
+            label_meta = LESION_META[lesion_type]
+
+            res_item = {
                 "key":        key_map[lesion_type],
-                "label":      label_map[lesion_type]["label"],
+                "label":      label_meta["label"],
                 "detected":   detected,
                 "area_pct":   area_pct,
-                "confidence": label_map[lesion_type]["confidence"],
-            })
+                "confidence": label_meta["confidence"],
+            }
+            return lesion_type, binary_full, res_item
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            outputs = list(executor.map(_infer_lesion, self._models.items()))
+
+        for lesion_type, binary_full, res_item in outputs:
+            binary_masks[lesion_type] = binary_full
+            lesion_results_dict[lesion_type] = res_item
+
+        lesion_results = [
+            lesion_results_dict["MA"],
+            lesion_results_dict["HE"],
+            lesion_results_dict["EX"],
+        ]
 
         # ── 5. Tạo ảnh Overlay (MA=Đỏ, HE=Cam, EX=Vàng) ────────────────────
         overlay_bgr = _create_overlay(raw_bgr, binary_masks)
@@ -440,10 +467,10 @@ class LesionInferenceService:
         mask_url = f"/uploads/{filename}"
 
         return {
-            "lesions":         lesion_results,
+            "lesions": lesion_results,
             "lesion_mask_url": mask_url,
-            "model_version":   MODEL_VERSION,
-            "status":          "ok",
+            "model_version": MODEL_VERSION,
+            "status": "ok",
         }
 
     def model_info(self) -> dict[str, Any]:

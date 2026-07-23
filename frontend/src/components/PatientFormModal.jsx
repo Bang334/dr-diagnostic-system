@@ -51,7 +51,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
   if (!isOpen) return null;
 
   return (
-    <div style={{
+    <div className="modal-overlay" style={{
       position: 'fixed',
       top: 0,
       left: 0,
@@ -64,7 +64,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
       zIndex: 1000,
       backdropFilter: 'blur(4px)'
     }}>
-      <div className="card" style={{
+      <div className="card modal-card" role="dialog" aria-modal="true" aria-labelledby="patient-form-title" style={{
         width: '90%',
         maxWidth: '600px',
         maxHeight: '90vh',
@@ -76,6 +76,8 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
         animation: 'fadeIn 0.2s ease-out'
       }}>
         <button 
+          type="button"
+          aria-label="Đóng biểu mẫu bệnh nhân"
           onClick={onClose}
           style={{
             position: 'absolute',
@@ -90,7 +92,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
           <X size={24} />
         </button>
 
-        <h3 style={{ fontSize: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <h3 id="patient-form-title" style={{ fontSize: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <UserPlus size={22} color="var(--primary)" /> Đăng ký bệnh nhân mới
         </h3>
 
@@ -101,7 +103,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
         )}
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <div className="form-grid form-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '13px', fontWeight: '500' }}>Mã bệnh nhân</label>
               <input 
@@ -127,7 +129,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <div className="form-grid form-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '13px', fontWeight: '500' }}>Giới tính</label>
               <select 
@@ -154,7 +156,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <div className="form-grid form-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '13px', fontWeight: '500' }}>Số điện thoại</label>
               <input 
@@ -181,7 +183,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
 
           <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '16px', marginTop: '8px' }}>
             <h4 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--primary)' }}>Thông tin lâm sàng (Tiểu đường)</h4>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+            <div className="form-grid form-grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <label style={{ fontSize: '12px', fontWeight: '500' }}>Loại tiểu đường</label>
                 <select 
@@ -224,7 +226,7 @@ export default function PatientFormModal({ isOpen, onClose, onSubmit }) {
             </div>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '16px' }}>
+          <div className="modal-actions" style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '16px' }}>
             <button type="button" className="btn btn-secondary" onClick={onClose}>Hủy</button>
             <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
               {isSubmitting ? 'Đang lưu...' : 'Lưu bệnh nhân'}

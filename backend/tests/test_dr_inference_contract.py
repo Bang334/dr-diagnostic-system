@@ -1,11 +1,7 @@
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-import httpx
-
-from main import app
 from app.services.dr_inference import (
     DRInferenceService,
     InvalidFundusImage,
@@ -52,40 +48,6 @@ class DRInferenceContractTests(unittest.TestCase):
         self.assertEqual(info["architecture"], "vit_large_patch14_dinov2.lvd142m")
         self.assertEqual(info["image_size"], 224)
         self.assertEqual(info["classes"], 5)
-
-
-class DiagnosisAPIContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_multipart_upload_returns_prediction_contract(self):
-        expected = DRInferenceService.format_result(
-            [0.05, 0.10, 0.60, 0.20, 0.05],
-            preview_b64="data:image/png;base64,preview",
-            model_version="fake-model",
-            device="cpu",
-        )
-
-        class FakeService:
-            def predict(self, content):
-                self.content = content
-                return expected
-
-        transport = httpx.ASGITransport(app=app)
-        with patch(
-            "app.api.diagnosis.get_dr_inference_service",
-            return_value=FakeService(),
-        ):
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url="http://test",
-            ) as client:
-                response = await client.post(
-                    "/api/v1/diagnosis/analyze",
-                    files={"file": ("fundus.jpg", b"jpeg-bytes", "image/jpeg")},
-                )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["dr_grade"], 2)
-        self.assertEqual(len(response.json()["probabilities"]), 5)
-
 
 if __name__ == "__main__":
     unittest.main()

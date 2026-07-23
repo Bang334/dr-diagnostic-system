@@ -3,8 +3,9 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import get_current_user
-from app.models.clinical import DoctorReview, Screening, User
+from app.core.security import require_staff
+from app.models.account import Account
+from app.models.clinical import DoctorReview, Screening
 from app.models.patient import Patient
 from app.schemas.report import EpidemiologyReport
 
@@ -19,7 +20,7 @@ def _rate(detected: int, total: int) -> float:
 @router.get("/epidemiology", response_model=EpidemiologyReport)
 def epidemiology_report(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_account: Account = Depends(require_staff),
 ):
     age_group_expr = case(
         (func.date_part("year", func.age(Patient.date_of_birth)) < 40, "Under 40"),

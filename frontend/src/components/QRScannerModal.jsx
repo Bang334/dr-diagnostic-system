@@ -89,7 +89,7 @@ export default function QRScannerModal({ isOpen, onClose, onScanSuccess }) {
   if (!isOpen) return null;
 
   return (
-    <div style={{
+    <div className="modal-overlay" style={{
       position: 'fixed',
       top: 0,
       left: 0,
@@ -102,7 +102,7 @@ export default function QRScannerModal({ isOpen, onClose, onScanSuccess }) {
       zIndex: 1000,
       backdropFilter: 'blur(4px)'
     }}>
-      <div className="card" style={{
+      <div className="card modal-card qr-modal" role="dialog" aria-modal="true" aria-labelledby="qr-scanner-title" style={{
         width: '90%',
         maxWidth: '500px',
         position: 'relative',
@@ -112,6 +112,8 @@ export default function QRScannerModal({ isOpen, onClose, onScanSuccess }) {
         animation: 'fadeIn 0.2s ease-out'
       }}>
         <button 
+          type="button"
+          aria-label="Đóng trình quét QR"
           onClick={onClose}
           style={{
             position: 'absolute',
@@ -126,7 +128,7 @@ export default function QRScannerModal({ isOpen, onClose, onScanSuccess }) {
           <X size={24} />
         </button>
 
-        <h3 style={{ fontSize: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <h3 id="qr-scanner-title" style={{ fontSize: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Camera size={22} color="var(--primary)" /> Quét mã QR Bệnh nhân
         </h3>
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Iterable
+from typing import Dict, Optional
 
 from app.clinical.models import (
     ClinicalContext,
@@ -61,7 +61,6 @@ def _macular_status(segmentation) -> tuple[str, list[str]]:
 
 def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
     grade = grading.dr_grade
-    visual_acuity = context.visual_acuity_for(eye)
     safety_flags = []
     findings = [f"ICDR Grade {grade}: {grading.dr_label}."]
     actions = ["Bác sĩ xác nhận phân giai đoạn trên bộ ảnh và đối chiếu khám lâm sàng."]
@@ -69,17 +68,7 @@ def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
     macular_status, macular_notes = _macular_status(segmentation)
     findings.extend(macular_notes)
 
-    if context.sudden_vision_loss:
-        priority = "emergency"
-        follow_up = "Đánh giá trực tiếp trong ngày"
-        referral = "Chuyển khám mắt/cấp cứu ngay; không chờ kết quả AI."
-        safety_flags.append("sudden_vision_loss")
-    elif visual_acuity is not None and visual_acuity < 0.5:
-        priority = "urgent"
-        follow_up = "Đánh giá chuyên khoa sớm"
-        referral = "Chuyển chuyên khoa mắt do thị lực < 5/10, kể cả khi ảnh không thấy DR."
-        safety_flags.append("visual_acuity_below_5_10")
-    elif grade == 4:
+    if grade == 4:
         priority = "urgent"
         follow_up = "Dưới 1 tháng"
         referral = "Chuyển chuyên khoa mắt tuyến tỉnh/trung ương trong vòng dưới 1 tháng."
@@ -116,26 +105,11 @@ def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
         findings.append(
             "Model tổn thương hiện không đủ để tự xác nhận quy tắc 4-2-1, tân mạch hoặc xuất huyết dịch kính."
         )
-    if context.pregnant:
-        priority = max((priority, "prompt"), key=PRIORITY_ORDER.get)
-        safety_flags.append("pregnancy_requires_individual_follow_up")
-        actions.append("Thai kỳ với ĐTĐ có từ trước cần lịch khám mắt cá thể hóa bởi bác sĩ.")
-    if context.kidney_disease:
-        priority = max((priority, "prompt"), key=PRIORITY_ORDER.get)
-        safety_flags.append("kidney_disease_systemic_risk")
-        actions.append("Bệnh thận là yếu tố nguy cơ toàn thân; phối hợp bác sĩ điều trị để cá thể hóa theo dõi.")
     if context.hba1c is not None and context.hba1c > 8:
         safety_flags.append("hba1c_above_operational_flag")
         actions.append("HbA1c trên 8% được gắn cờ vận hành; mục tiêu điều trị phải cá thể hóa, không cộng điểm nguy cơ.")
-    if (
-        context.systolic_bp is not None
-        and context.diastolic_bp is not None
-        and (context.systolic_bp >= 140 or context.diastolic_bp >= 90)
-    ):
-        safety_flags.append("blood_pressure_above_operational_flag")
-        actions.append("Huyết áp từ 140/90 mmHg được gắn cờ để bác sĩ đánh giá; không tự thay đổi thuốc hoặc cộng risk score.")
 
-    actions.append("Tối ưu đường huyết, huyết áp và lipid theo bác sĩ điều trị; không dùng risk score tự đặt.")
+    actions.append("Kiểm soát đái tháo đường theo bác sĩ điều trị; không dùng risk score tự đặt.")
     return priority, follow_up, referral, macular_status, findings, actions, safety_flags
 
 
@@ -148,15 +122,14 @@ class ClinicalAnalysisModule:
 
     async def _analyze_eye(self, images: EyeImageSet, context: ClinicalContext) -> EyeClinicalAssessment:
         quality = {
-            "disc": assess_technical_quality(images.disc_image),
-            "posterior_pole": assess_technical_quality(images.posterior_pole_image),
+            "fundus": assess_technical_quality(images.fundus_image),
         }
         if not all(item.technically_valid for item in quality.values()):
             raise InvalidFundusSet({images.eye: quality})
 
         grading, segmentation = await asyncio.gather(
-            self._grading.predict(images.posterior_pole_image, images.eye),
-            self._segmentation.predict(images.posterior_pole_image, images.eye),
+            self._grading.predict(images.fundus_image, images.eye),
+            self._segmentation.predict(images.fundus_image, images.eye),
         )
         rule = _clinical_rule(images.eye, grading, segmentation, context)
         return EyeClinicalAssessment(
@@ -175,16 +148,21 @@ class ClinicalAnalysisModule:
 
     async def analyze(
         self,
-        left: EyeImageSet,
-        right: EyeImageSet,
+        left: Optional[EyeImageSet],
+        right: Optional[EyeImageSet],
         context: ClinicalContext,
     ) -> ScreeningAssessment:
-        left_result, right_result = await asyncio.gather(
-            self._analyze_eye(left, context),
-            self._analyze_eye(right, context),
+        requested = [images for images in (left, right) if images is not None]
+        if not requested:
+            raise InvalidFundusSet({"eyes": "Cần ít nhất một ảnh mắt trái hoặc mắt phải."})
+        analyzed = await asyncio.gather(
+            *(self._analyze_eye(images, context) for images in requested)
         )
+        by_eye = {item.eye: item for item in analyzed}
+        left_result = by_eye.get("L")
+        right_result = by_eye.get("R")
         overall = max(
-            (left_result.review_priority, right_result.review_priority),
+            (item.review_priority for item in analyzed),
             key=PRIORITY_ORDER.get,
         )
         recommendation = (

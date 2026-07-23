@@ -31,7 +31,6 @@ from ai.semi_supervised.semi_supervised_training import (
     limit_labeled_replay,
     limit_unlabeled_paths,
     parse_args as parse_semi_args,
-    parse_thresholds,
     prepare_output_dir,
     resume_training_state,
     trim_history_for_resume,
@@ -53,7 +52,7 @@ class ArgumentDefaultTests(unittest.TestCase):
                 "output",
             ]
         )
-        self.assertEqual(args.threshold, [0.95] * 5)
+        self.assertEqual(args.threshold, 0.95)
         self.assertEqual(args.pseudo_weight, 0.25)
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
@@ -63,29 +62,6 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.max_pseudo_per_class, 0)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
-
-    def test_accepts_one_threshold_per_dr_grade(self):
-        thresholds = parse_thresholds("0.93,0.75,0.90,0.80,0.80")
-        self.assertEqual(thresholds, [0.93, 0.75, 0.90, 0.80, 0.80])
-
-        args = parse_semi_args(
-            [
-                "--checkpoint", "best.pth",
-                "--dataset-dir", "dataset",
-                "--unlabeled-dir", "unlabeled",
-                "--output-dir", "output",
-                "--threshold", "0.93,0.75,0.90,0.80,0.80",
-            ]
-        )
-        self.assertEqual(args.threshold, thresholds)
-
-    def test_rejects_threshold_count_other_than_one_or_five(self):
-        with self.assertRaisesRegex(ValueError, "one value or exactly 5"):
-            parse_thresholds("0.9,0.8")
-
-    def test_rejects_out_of_range_class_threshold(self):
-        with self.assertRaisesRegex(ValueError, "grade 2"):
-            parse_thresholds("0.98,0.75,0.40,0.85,0.85")
 
     def test_eval_only_requires_resume_checkpoint(self):
         args = parse_semi_args(
@@ -459,32 +435,11 @@ class _PseudoDataset(Dataset):
         return torch.full((3, 2, 2), value), str(self.root / f"{index}.jpg")
 
 
-class _BalancedPseudoDataset(Dataset):
-    def __init__(self, root):
-        self.root = root
-
-    def __len__(self):
-        return 6
-
-    def __getitem__(self, index):
-        value = 0.0 if index < 3 else 1.0
-        return torch.full((3, 2, 2), value), str(self.root / f"{index}.jpg")
-
-
 class _ConfidenceModel(nn.Module):
     def forward(self, images):
         logits = torch.zeros(images.size(0), 5, device=images.device)
         strong = images[:, 0, 0, 0] > 0.5
         logits[strong, 2] = 10.0
-        return logits
-
-
-class _PerClassConfidenceModel(nn.Module):
-    def forward(self, images):
-        logits = torch.zeros(images.size(0), 5, device=images.device)
-        grade_two = images[:, 0, 0, 0] > 0.5
-        logits[grade_two, 2] = 4.0
-        logits[~grade_two, 0] = 3.0
         return logits
 
 
@@ -506,41 +461,6 @@ class PseudoLabelTests(unittest.TestCase):
         self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 2)
         self.assertGreater(float(frame.iloc[0]["confidence"]), 0.95)
         self.assertIn("Pseudo-label progress: image 1/2", output.getvalue())
-
-    def test_applies_threshold_for_the_predicted_grade(self):
-        thresholds = [0.93, 0.75, 0.90, 0.80, 0.80]
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
-            with contextlib.redirect_stdout(io.StringIO()):
-                frame = generate_pseudo_labels(
-                    _PerClassConfidenceModel(),
-                    loader,
-                    torch.device("cpu"),
-                    threshold=thresholds,
-                    max_per_class=0,
-                    amp_enabled=False,
-                )
-
-        self.assertEqual(frame["pseudo_label"].tolist(), [2])
-        self.assertEqual(frame["applied_threshold"].tolist(), [0.90])
-
-    def test_limits_each_predicted_grade_independently(self):
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            loader = DataLoader(
-                _BalancedPseudoDataset(Path(temporary_dir)), batch_size=3
-            )
-            with contextlib.redirect_stdout(io.StringIO()):
-                frame = generate_pseudo_labels(
-                    _PerClassConfidenceModel(),
-                    loader,
-                    torch.device("cpu"),
-                    threshold=[0.5] * 5,
-                    max_per_class=2,
-                    amp_enabled=False,
-                )
-
-        self.assertEqual(len(frame), 4)
-        self.assertEqual(frame["pseudo_label"].value_counts().to_dict(), {0: 2, 2: 2})
 
 
 if __name__ == "__main__":

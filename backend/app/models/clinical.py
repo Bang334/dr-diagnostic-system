@@ -18,41 +18,22 @@ from sqlalchemy.orm import relationship
 from app.core.database import Base
 
 
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, nullable=False, index=True)
-    password_hash = Column(String(255), nullable=False)
-    full_name = Column(String(100), nullable=False)
-    email = Column(String(100), unique=True)
-    role = Column(String(20), nullable=False, default="doctor")
-    hospital_department = Column(String(100))
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-
 class Screening(Base):
     __tablename__ = "screenings"
 
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
-    doctor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"))
+    doctor_id = Column(Integer, ForeignKey("doctors.id", ondelete="SET NULL"))
     screening_date = Column(DateTime(timezone=True), server_default=func.now())
-    left_eye_image_url = Column(Text, nullable=False)
-    right_eye_image_url = Column(Text, nullable=False)
-    left_disc_image_url = Column(Text)
-    right_disc_image_url = Column(Text)
-    left_eye_image_quality = Column(String(20), default="Good")
-    right_eye_image_quality = Column(String(20), default="Good")
+    left_eye_image_url = Column(Text, nullable=True)
+    right_eye_image_url = Column(Text, nullable=True)
     status = Column(String(20), default="Pending", index=True)
-    review_status = Column(String(20), default="draft")
-    clinical_assessment = Column(JSONB)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     patient = relationship("Patient")
-    doctor = relationship("User")
+    created_by_account = relationship("Account")
+    doctor = relationship("Doctor")
     ai_results = relationship("AIResult", cascade="all, delete-orphan")
     segmentation_results = relationship("LesionSegmentationResult", cascade="all, delete-orphan")
     reviews = relationship("DoctorReview", cascade="all, delete-orphan")
@@ -101,12 +82,16 @@ class DoctorReview(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     screening_id = Column(Integer, ForeignKey("screenings.id", ondelete="CASCADE"), nullable=False)
-    doctor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"))
+    doctor_id = Column(Integer, ForeignKey("doctors.id", ondelete="SET NULL"))
     eye = Column(CHAR(1), nullable=False)
     final_dr_grade = Column(Integer, nullable=False)
     is_agree_with_ai = Column(Boolean, nullable=False)
     clinical_notes = Column(Text)
     confirmed_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    reviewed_by_account = relationship("Account")
+    doctor = relationship("Doctor")
 
     __table_args__ = (
         CheckConstraint("eye IN ('L', 'R')", name="doctor_reviews_eye_check"),

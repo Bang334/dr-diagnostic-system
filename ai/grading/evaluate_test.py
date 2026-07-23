@@ -84,9 +84,37 @@ def _build_fake_args(real_args: argparse.Namespace) -> argparse.Namespace:
 
 
 def load_test_split(args: argparse.Namespace, fake_args: argparse.Namespace):
-    split_paths = find_predefined_splits(args.dataset_dir)
-    dataset_root = next(iter(split_paths.values())).parent
-    test_df = scan_classification_split(split_paths["test"], dataset_root)
+    dataset_dir = args.dataset_dir.expanduser().resolve()
+    try:
+        split_paths = find_predefined_splits(dataset_dir)
+        dataset_root = next(iter(split_paths.values())).parent
+        test_dir = split_paths["test"]
+        test_df = scan_classification_split(test_dir, dataset_root)
+    except ValueError as split_error:
+        # A test-only ZIP may contain test/0..4 or directly 0..4, without
+        # train/validation. Accept a complete five-class split below wrappers.
+        candidates = [dataset_dir]
+        candidates.extend(
+            path
+            for path in sorted(dataset_dir.rglob("*"))
+            if path.is_dir() and len(path.relative_to(dataset_dir).parts) <= 2
+        )
+        test_df = None
+        test_dir = None
+        for candidate in candidates:
+            try:
+                frame = scan_classification_split(candidate, dataset_dir)
+            except (OSError, ValueError):
+                continue
+            test_df = frame
+            test_dir = candidate
+            break
+        if test_df is None:
+            raise ValueError(
+                f"Could not find a complete test split below {dataset_dir}. "
+                "Expected train/validation/test, test/0..4, or directly 0..4."
+            ) from split_error
+        print(f"Using test-only split from {test_dir}")
     
     if getattr(args, "limit_per_class", None) is not None:
         limit = args.limit_per_class
@@ -94,17 +122,20 @@ def load_test_split(args: argparse.Namespace, fake_args: argparse.Namespace):
         test_df = test_df.groupby("diagnosis").head(limit).reset_index(drop=True)
         
     counts = test_df["diagnosis"].value_counts().sort_index().to_dict()
-    print(f"Test split (limited): {len(test_df):,} samples → {counts}")
+    suffix = " (limited)" if getattr(args, "limit_per_class", None) else ""
+    print(f"Test split{suffix}: {len(test_df):,} samples -> {counts}")
     return test_df
 
 
 def load_checkpoint(checkpoint_path: Path, device: torch.device):
     print(f"Loading checkpoint: {checkpoint_path}")
     
-    # Khắc phục lỗi PosixPath trên hệ điều hành Windows
+    # Checkpoints produced on Linux can contain pathlib.PosixPath objects.
+    # Translate those objects only on Windows; WindowsPath is invalid on Colab/Linux.
     import pathlib
     temp = pathlib.PosixPath
-    pathlib.PosixPath = pathlib.WindowsPath
+    if os.name == "nt":
+        pathlib.PosixPath = pathlib.WindowsPath
     try:
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     finally:

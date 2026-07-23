@@ -14,6 +14,24 @@
 3. ICDR, Wilkinson et al. 2003, thang phân loại DR năm mức.
 4. ADA Standards of Care in Diabetes 2026, mục Retinopathy.
 
+## Ranh giới giữa chẩn đoán đái tháo đường và chẩn đoán DR
+
+- QĐ 2558/QĐ-BYT xác định bệnh võng mạc đái tháo đường ở người đã được chẩn
+  đoán đái tháo đường và có dấu hiệu trên khám/ảnh đáy mắt hoặc chụp mạch. Nếu
+  chưa có tiền sử đái tháo đường nhưng nghi ngờ, người bệnh cần làm xét nghiệm.
+- ADA 2026 chẩn đoán đái tháo đường bằng HbA1c hoặc glucose huyết tương
+  (FPG/OGTT/random glucose trong bối cảnh phù hợp), không dùng ảnh fundus như
+  tiêu chuẩn chẩn đoán:
+  https://diabetesjournals.org/care/article/49/Supplement_1/S27/163926/2-Diagnosis-and-Classification-of-Diabetes
+- Các hệ thống AI võng mạc đã được FDA cho phép như AEYE-DS dùng để phát hiện
+  DR ở người lớn **đã được chẩn đoán đái tháo đường**, không dùng để chẩn đoán
+  đái tháo đường:
+  https://www.accessdata.fda.gov/cdrh_docs/pdf24/K240058.pdf
+- Nghiên cứu có thể dự đoán nguy cơ/type 2 diabetes từ ảnh fundus, nhưng đó là
+  một bài toán mô hình riêng, cần nhãn đái tháo đường có đối chứng xét nghiệm,
+  validation ngoài và ngưỡng vận hành riêng. DR grade 0–4 hiện tại không phải
+  nhãn có/không đái tháo đường.
+
 ## Rule được phép dùng
 
 | Đầu ra | Ý nghĩa |
@@ -44,12 +62,16 @@ chứng, thị lực và khả năng theo dõi đều có thể làm thay đổi
 
 - Luật Khám bệnh, chữa bệnh 15/2023/QH15: quyết định chuyên môn thuộc người
   hành nghề/cơ sở đủ điều kiện.
+- Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15, có hiệu lực từ 01/01/2026: khi
+  triển khai phải xác định vai trò, căn cứ và trách nhiệm giải trình cho toàn
+  bộ vòng đời dữ liệu sức khỏe; đồng thời đối chiếu văn bản hướng dẫn hiện hành.
 - Nghị định 98/2021/NĐ-CP, sửa đổi bởi Nghị định 07/2023/NĐ-CP: phải thực hiện
   đánh giá phân loại, hồ sơ và thủ tục thiết bị y tế phù hợp với mục đích sử dụng;
   tài liệu này không tự kết luận hệ thống thuộc loại B hay C.
-- Nghị định 13/2023/NĐ-CP: ảnh mắt và hồ sơ sức khỏe là dữ liệu nhạy cảm; triển
-  khai thật cần căn cứ xử lý, phân quyền, nhật ký, mã hóa, thời hạn lưu/xóa và hồ
-  sơ đánh giá tác động xử lý dữ liệu cá nhân.
+- Nghị định 13/2023/NĐ-CP là nguồn hồ sơ dự án đang viện dẫn về dữ liệu nhạy
+  cảm; phạm vi áp dụng phải được rà soát cùng Luật 91/2025/QH15 và văn bản hướng
+  dẫn mới. Tối thiểu cần phân quyền, nhật ký, mã hóa, thời hạn lưu/xóa, đánh giá
+  tác động và quy trình sự cố.
 - Trước sử dụng thật cần validation đa trung tâm, calibration theo máy/cơ sở,
   giám sát drift, quản lý phiên bản model, quy trình sự cố và bác sĩ nhãn khoa
   phê duyệt toàn bộ rule.

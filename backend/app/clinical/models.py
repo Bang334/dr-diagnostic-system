@@ -17,27 +17,19 @@ DR_LABELS = {
 
 @dataclass(frozen=True)
 class EyeImageSet:
-    """Minimum photographic set in QD 2557/QD-BYT: disc and posterior pole."""
+    """One gradable fundus image for one eye."""
 
     eye: str
-    disc_image: bytes
-    posterior_pole_image: bytes
+    fundus_image: bytes
 
 
 class ClinicalContext(BaseModel):
     patient_code: Optional[str] = None
+    age_years: Optional[int] = Field(default=None, ge=0, le=130)
+    gender: Optional[str] = None
+    diabetes_type: Optional[str] = None
     diabetes_duration_years: Optional[float] = Field(default=None, ge=0)
     hba1c: Optional[float] = Field(default=None, ge=0, le=20)
-    systolic_bp: Optional[int] = Field(default=None, ge=40, le=300)
-    diastolic_bp: Optional[int] = Field(default=None, ge=20, le=200)
-    visual_acuity_left: Optional[float] = Field(default=None, ge=0, le=2)
-    visual_acuity_right: Optional[float] = Field(default=None, ge=0, le=2)
-    sudden_vision_loss: bool = False
-    pregnant: bool = False
-    kidney_disease: bool = False
-
-    def visual_acuity_for(self, eye: str) -> Optional[float]:
-        return self.visual_acuity_left if eye == "L" else self.visual_acuity_right
 
 
 class ImageQuality(BaseModel):
@@ -92,14 +84,12 @@ class EyeClinicalAssessment(BaseModel):
     findings: List[str]
     actions: List[str]
     safety_flags: List[str]
-    review_status: str = "draft"
 
 
 class ScreeningAssessment(BaseModel):
     status: str = "ok"
-    review_status: str = "draft"
-    left_eye: EyeClinicalAssessment
-    right_eye: EyeClinicalAssessment
+    left_eye: Optional[EyeClinicalAssessment] = None
+    right_eye: Optional[EyeClinicalAssessment] = None
     overall_priority: str
     clinical_recommendation: str
     guideline_ids: List[str]
