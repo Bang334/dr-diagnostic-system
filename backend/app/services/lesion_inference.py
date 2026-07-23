@@ -93,15 +93,60 @@ def _extract_roi(image: np.ndarray) -> tuple[np.ndarray, tuple]:
     return image[y_min:y_max, x_min:x_max], (y_min, y_max, x_min, x_max)
 
 
+def _reinhard_color_normalize(image_bgr: np.ndarray) -> np.ndarray:
+    """
+    Chuẩn hóa màu sắc Reinhard Color Transfer (Lab color space).
+    Tự động phát hiện ảnh bị lệch màu (Red-free / Yellow cast) và nắn dải màu Lab
+    về tông màu đỏ-cam chuẩn võng mạc trước khi trích xuất kênh Green cho AI.
+    """
+    try:
+        lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        l, a, b = cv2.split(lab)
+
+        a_mean, b_mean = a.mean(), b.mean()
+
+        # Nếu a_mean < 138 (bị lệch xanh/vàng) hoặc b_mean > 162 (bị vàng chói)
+        if a_mean < 138 or b_mean > 162:
+            target_a_mean, target_a_std = 152.0, 12.0
+            target_b_mean, target_b_std = 148.0, 14.0
+
+            a_std = max(a.std(), 1e-5)
+            b_std = max(b.std(), 1e-5)
+
+            a_norm = ((a - a_mean) / a_std) * target_a_std + target_a_mean
+            b_norm = ((b - b_mean) / b_std) * target_b_std + target_b_mean
+
+            lab_norm = cv2.merge([l, np.clip(a_norm, 0, 255), np.clip(b_norm, 0, 255)])
+            normalized_bgr = cv2.cvtColor(lab_norm.astype(np.uint8), cv2.COLOR_LAB2BGR)
+            return normalized_bgr
+    except Exception:
+        pass
+    return image_bgr
+
+
+def _apply_ben_graham(green_channel: np.ndarray, sigma: int = 10) -> np.ndarray:
+    """
+    Trừ nhiễu nền mờ Ben Graham Preprocessing:
+    Trừ đi giá trị làm mờ Gaussian để triệt tiêu 100% sai lệch màu sắc/độ chói nền toàn cục.
+    """
+    blur = cv2.GaussianBlur(green_channel, (0, 0), sigma)
+    normalized = cv2.addWeighted(green_channel, 4.0, blur, -4.0, 128)
+    return normalized
+
+
 def _clahe_green_channel(image_bgr: np.ndarray) -> np.ndarray:
     """
-    Trích xuất kênh Green + CLAHE: kênh xanh lá hiển thị tổn thương
-    mạch máu rõ nhất và là đầu vào 1-channel của model.
+    Tiền xử lý chuẩn theo pipeline huấn luyện:
+    1. Cân bằng màu Reinhard (Lab space)
+    2. Trích xuất kênh Green
+    3. Ben Graham background subtraction (trừ nền mờ)
+    4. CLAHE contrast enhancement
     """
-    green = image_bgr[:, :, 1]  # Green channel
+    normalized_bgr = _reinhard_color_normalize(image_bgr)
+    green = normalized_bgr[:, :, 1]
+    graham = _apply_ben_graham(green, sigma=10)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(green)
-    # Chuẩn hóa [0,1]
+    enhanced = clahe.apply(graham)
     return enhanced.astype(np.float32) / 255.0
 
 
@@ -414,9 +459,10 @@ class LesionInferenceService:
             prob_map = cv2.resize(prob_map, (roi_bgr.shape[1], roi_bgr.shape[0]),
                                   interpolation=cv2.INTER_LINEAR)
 
+            thresh = 0.75 if lesion_type == "EX" else config.threshold
             binary_roi = _post_process(
                 prob_map,
-                threshold=config.threshold,
+                threshold=thresh,
                 min_area=config.min_lesion_area,
                 raw_image=roi_bgr,
                 use_od_mask=config.use_optic_disc_mask,
