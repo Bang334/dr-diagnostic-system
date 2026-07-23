@@ -7,6 +7,7 @@ training, evaluation, and deployment use the same image contract.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -33,16 +34,27 @@ class PreprocessingSpec:
         return asdict(self)
 
 
-def _crop_fundus(image: np.ndarray) -> np.ndarray:
+def _legacy_crop(image: np.ndarray, tolerance: int = 7) -> np.ndarray:
+    """Compatibility fallback used by the original grading pipeline."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    mask = gray > tolerance
+    if not mask.any():
+        return image.copy()
+    rows = np.flatnonzero(mask.any(axis=1))
+    columns = np.flatnonzero(mask.any(axis=0))
+    return image[rows[0] : rows[-1] + 1, columns[0] : columns[-1] + 1].copy()
+
+
+def _crop_fundus(image: np.ndarray) -> tuple[np.ndarray, str | None]:
     if image is None or image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("Expected a non-empty BGR image with three channels")
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     mask = gray > max(5, int(np.percentile(gray, 5)))
     points = cv2.findNonZero(mask.astype(np.uint8))
     if points is None:
-        raise ValueError("No fundus field detected")
+        return _legacy_crop(image), "no field detected; used legacy/full-image crop"
     x, y, w, h = cv2.boundingRect(points)
-    return image[y : y + h, x : x + w]
+    return image[y : y + h, x : x + w], None
 
 
 def _green_channel(image: np.ndarray) -> np.ndarray:
@@ -64,8 +76,15 @@ def _ben_graham(image: np.ndarray, spec: PreprocessingSpec) -> np.ndarray:
     return cv2.addWeighted(image, 4.0, blurred, -4.0, 128.0)
 
 
-def preprocess_fundus(image_bgr: np.ndarray, spec: PreprocessingSpec) -> np.ndarray:
-    image = _crop_fundus(image_bgr)
+def preprocess_fundus(
+    image_bgr: np.ndarray,
+    spec: PreprocessingSpec,
+    *,
+    fallback_logger: Callable[[str], None] | None = None,
+) -> np.ndarray:
+    image, fallback_reason = _crop_fundus(image_bgr)
+    if fallback_reason is not None and fallback_logger is not None:
+        fallback_logger(fallback_reason)
     image = cv2.resize(image, (spec.image_size, spec.image_size), interpolation=cv2.INTER_AREA)
     if spec.recipe == "green":
         image = _green_channel(image)
@@ -74,4 +93,3 @@ def preprocess_fundus(image_bgr: np.ndarray, spec: PreprocessingSpec) -> np.ndar
     elif spec.recipe == "ben_graham":
         image = _ben_graham(image, spec)
     return np.ascontiguousarray(image, dtype=np.uint8)
-

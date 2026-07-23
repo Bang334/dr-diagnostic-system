@@ -144,6 +144,12 @@ crop (`rgb_crop`), green-channel extraction (`green`), green-channel CLAHE
 `--preprocessing`; its complete specification is stored in the checkpoint and
 reused automatically for test and PyTorch deployment.
 
+If the primary fundus-field detector cannot find a usable bright region, the
+pipeline falls back to the original tolerance-based crop (or the full decoded
+image for a completely dark frame) instead of aborting a DataLoader worker.
+Training prints `[preprocessing-warning] image=<path>` so questionable source
+images remain auditable and can be removed in a later data-quality pass.
+
 `predictor.py` is the single inference interface. `load_predictor()` selects a
 Keras adapter for `.keras`/`.h5` or a PyTorch adapter for `.pth`/`.pt`; callers
 always receive the same five-grade ICDR/ETDRS response contract.

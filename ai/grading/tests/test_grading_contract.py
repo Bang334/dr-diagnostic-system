@@ -43,6 +43,19 @@ class PreprocessingTests(unittest.TestCase):
                 self.assertEqual(result.shape, (64, 64, 3))
                 self.assertEqual(result.dtype, np.uint8)
 
+    def test_dark_image_does_not_abort_the_entire_dataloader(self):
+        dark_image = np.zeros((120, 160, 3), dtype=np.uint8)
+        warnings = []
+        result = preprocess_fundus(
+            dark_image,
+            PreprocessingSpec("rgb_crop", 64),
+            fallback_logger=warnings.append,
+        )
+        self.assertEqual(result.shape, (64, 64, 3))
+        self.assertEqual(result.dtype, np.uint8)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("legacy/full-image crop", warnings[0])
+
 
 class BackboneBenchmarkTests(unittest.TestCase):
     def test_controlled_benchmark_contains_required_architectures(self):

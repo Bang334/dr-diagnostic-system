@@ -384,6 +384,9 @@ class FundusDataset(Dataset):
         image_bgr = preprocess_fundus(
             image_bgr,
             PreprocessingSpec(recipe=recipe, image_size=self.args.image_size),
+            fallback_logger=lambda reason: print(
+                f"[preprocessing-warning] image={path} | {reason}", flush=True
+            ),
         )
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         image = self.transform(Image.fromarray(image_rgb))
