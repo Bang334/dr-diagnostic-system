@@ -26,6 +26,8 @@ class TestOnlyNotebookTests(unittest.TestCase):
         self.assertIn("/content/drive/MyDrive/test.zip", self.source)
         self.assertIn("/content/drive/MyDrive/checkpoint-best.pth", self.source)
         self.assertIn("ai.grading.evaluate_test", self.source)
+        self.assertIn("feat/keras-grade-semi-supervised", self.source)
+        self.assertNotIn("feat/brset-semi-patient-split", self.source)
         self.assertIn("notebook_test.log", self.source)
         self.assertIn("grading_contract", self.source)
         self.assertIn("dataset_audit", self.source)

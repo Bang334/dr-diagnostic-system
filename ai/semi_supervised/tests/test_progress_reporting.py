@@ -1,6 +1,8 @@
 import contextlib
 import io
+import itertools
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -10,7 +12,7 @@ from ai.semi_supervised.progress import ProgressReporter
 class ProgressReportingTests(unittest.TestCase):
     def test_long_phase_emits_start_progress_and_completion(self):
         output = io.StringIO()
-        clock_values = iter([100.0, 105.0, 110.0, 115.0])
+        clock_values = itertools.count(100.0, 5.0)
         with tempfile.TemporaryDirectory() as temporary_dir:
             with contextlib.redirect_stdout(output):
                 reporter = ProgressReporter(
@@ -30,6 +32,21 @@ class ProgressReportingTests(unittest.TestCase):
         self.assertIn("2/10", text)
         self.assertIn("ETA", text)
         self.assertIn("PHASE COMPLETE", text)
+
+    def test_heartbeat_appears_while_an_item_is_still_blocked(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with contextlib.redirect_stdout(output):
+                reporter = ProgressReporter(
+                    "model-warmup",
+                    total=1,
+                    log_path=Path(temporary_dir) / "progress.jsonl",
+                    heartbeat_seconds=0.02,
+                )
+                reporter.start(detail="first prediction")
+                time.sleep(0.055)
+                reporter.complete()
+        self.assertIn("HEARTBEAT", output.getvalue())
 
 
 if __name__ == "__main__":

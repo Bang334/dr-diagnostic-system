@@ -37,6 +37,20 @@ Training streams batch loss/accuracy/QWK/MAE and prints a train-versus-validatio
 summary after every epoch. Persistent logs are written to `history.csv`,
 `epoch-log.json`, and `tensorboard/` inside the run directory on Drive.
 
+Long work before `model.fit()` is also observable. Dataset discovery, external
+data audit, TensorFlow import, Keras model load, cache inventory and pseudo-label
+inference emit `PHASE START`, periodic `HEARTBEAT`, progress/rate/ETA and
+`PHASE COMPLETE` records. The default heartbeat is 30 seconds and pseudo-label
+progress is printed every 10 images; override them with:
+
+```bash
+--phase-heartbeat-seconds 30 --pseudo-log-every-images 10
+```
+
+Machine-readable phase records are appended to `progress.jsonl`. The Colab
+notebook additionally timestamps every child-process line in
+`notebook-live.log`, both under the training output directory on Drive.
+
 ## Dữ liệu được phép sử dụng
 
 Dataset có nhãn phải giữ nguyên cấu trúc split:
