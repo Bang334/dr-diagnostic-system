@@ -84,6 +84,25 @@ app.include_router(review_router, prefix="/api/v1")
 app.include_router(report_router, prefix="/api/v1")
 
 
+@app.on_event("startup")
+async def startup_prewarm_ai_models():
+    """Pre-load AI model checkpoints in background thread on server startup."""
+    import asyncio
+
+    def _prewarm():
+        try:
+            from app.services.dr_inference import get_dr_inference_service
+            from app.services.lesion_inference import get_lesion_inference_service
+            logger.info("⚡ Đang nạp trước (Pre-warming) các checkpoint AI vào bộ nhớ RAM/VRAM...")
+            get_dr_inference_service().load()
+            get_lesion_inference_service().load()
+            logger.info("✅ Nạp thành công toàn bộ mô hình AI. Hệ thống đã sẵn sàng xử lý siêu tốc!")
+        except Exception as err:
+            logger.warning("Bỏ qua nạp trước AI model: %s", err)
+
+    asyncio.get_running_loop().run_in_executor(None, _prewarm)
+
+
 @app.get("/api/v1/health", tags=["Health"])
 def health_check():
     return {
