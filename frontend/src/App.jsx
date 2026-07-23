@@ -1480,6 +1480,8 @@ function App() {
             && (currentUser.hospital_department || '').toLocaleLowerCase('vi-VN').includes('nhãn')
           )
         }
+      />
+
       {/* Fullscreen Image Lightbox Modal */}
       {lightboxImage && (
         <div 
