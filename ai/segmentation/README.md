@@ -22,3 +22,28 @@ Thư mục này chứa mã nguồn nghiên cứu, định nghĩa kiến trúc v�
 ## 🔗 Tích hợp với Backend
 
 Thư mục này được gọi trực tiếp bởi `backend/app/services/lesion_inference.py` thông qua cấu hình biến môi trường `SEGMENTATION_LESION_PATH=ai/segmentation` trong tệp `backend/.env`.
+
+---
+
+## ⬇️ Hướng Dẫn Tải Checkpoints Mô Hình (Model Weights)
+
+Vì giới hạn kích thước tệp của GitHub, các tệp trọng số Attention U-Net (`.ckpt`) KHÔNG được push trực tiếp lên repository.
+
+### 1. Liên kết tải về:
+* 📥 **Google Drive Folder:** [Tải bộ Checkpoints Attention U-Net tại đây](https://drive.google.com/drive/folders/1RvJSFmdrHxIxBLVQTIiECiQA5Ye817yf?usp=sharing)
+
+### 2. Cấu trúc đặt tệp trên máy cá nhân:
+Tải 3 tệp `.ckpt` từ đường link trên và đặt vào thư mục `backend/checkpoints/` theo đúng đường dẫn:
+
+```text
+backend/checkpoints/
+├── idrid_MA/
+│   └── best-checkpoint-epoch=17-val_dice=0.0305.ckpt
+├── idrid_HE/
+│   └── best-checkpoint-epoch=70-val_dice=0.0272.ckpt
+└── idrid_EX/
+    └── best-checkpoint-epoch=64-val_dice=0.0414.ckpt
+```
+
+Khi khởi chạy Backend, hệ thống sẽ tự động nạp trước (Pre-warm) 3 mô hình này vào RAM/VRAM để thực hiện suy luận phân đoạn tổn thương (MA, HE, EX) siêu tốc.
+
