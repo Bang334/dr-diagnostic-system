@@ -29,6 +29,22 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("Đổi threshold", self.source)
         self.assertIn("không xóa", self.source)
 
+    def test_downloads_the_two_kaggle_datasets_instead_of_assuming_drive_folders(self):
+        self.assertIn(
+            "sehastrajits/fundus-aptosddridirdeyepacsmessidor", self.source
+        )
+        self.assertIn(
+            "griffchristenson/unlabeled-retinal-image-dataset", self.source
+        )
+        self.assertIn("kaggle_cli", self.source)
+        self.assertIn("split_dataset", self.source)
+        self.assertNotIn(
+            "Path('/content/drive/MyDrive/fundus_merged')", self.source
+        )
+        self.assertNotIn(
+            "Path('/content/drive/MyDrive/fundus_unlabeled')", self.source
+        )
+
     def test_logs_child_process_and_handles_interrupt(self):
         self.assertIn("subprocess.Popen", self.source)
         self.assertIn("stderr=subprocess.STDOUT", self.source)
