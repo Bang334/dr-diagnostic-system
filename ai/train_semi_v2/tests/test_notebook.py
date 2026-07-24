@@ -68,6 +68,21 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("--batch-size", self.source)
         self.assertIn("--accum-steps", self.source)
 
+    def test_accepts_legacy_checkpoint_without_preprocessing_metadata(self):
+        self.assertIn(
+            "required = ['model_source', 'image_size', 'loss']",
+            self.source,
+        )
+        self.assertIn("inferred_preprocessing", self.source)
+        self.assertIn("rgb_crop", self.source)
+        self.assertIn("ben_graham", self.source)
+
+    def test_checks_out_the_pseudo_weight_fix_branch(self):
+        self.assertIn(
+            "GITHUB_BRANCH = 'fix/semi-pseudo-weight-batch4'",
+            self.source,
+        )
+
     def test_does_not_embed_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)

@@ -101,6 +101,11 @@ def load_grading_checkpoint(
     else:
         raise ValueError("Checkpoint field 'args' must be a mapping")
 
+    if not hasattr(saved_args, "preprocessing"):
+        saved_args.preprocessing = (
+            "ben_graham" if getattr(saved_args, "enhance", False) else "rgb_crop"
+        )
+
     loss_name = getattr(saved_args, "loss", "ce")
     if require_ce and loss_name != "ce":
         raise ValueError(

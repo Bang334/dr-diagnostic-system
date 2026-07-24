@@ -194,10 +194,38 @@ class CheckpointLoadingTests(unittest.TestCase):
         create_model.assert_called_once_with(
             "toy_model", pretrained=False, num_classes=5
         )
+        self.assertEqual(bundle.saved_args.preprocessing, "rgb_crop")
         for expected, actual in zip(
             original_model.parameters(), bundle.model.parameters()
         ):
             torch.testing.assert_close(expected, actual)
+
+    def test_infers_ben_graham_for_legacy_enhanced_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            checkpoint_path = Path(temporary_dir) / "checkpoint-best.pth"
+            original_model = nn.Linear(2, 5)
+            torch.save(
+                {
+                    "model": original_model.state_dict(),
+                    "args": {
+                        "loss": "ce",
+                        "model_source": "timm",
+                        "model_name": "toy_model",
+                        "image_size": 224,
+                        "enhance": True,
+                    },
+                },
+                checkpoint_path,
+            )
+            with patch(
+                "ai.train_semi_v2.runtime.timm.create_model",
+                return_value=nn.Linear(2, 5),
+            ):
+                bundle = load_grading_checkpoint(
+                    checkpoint_path, torch.device("cpu"), require_ce=True
+                )
+
+        self.assertEqual(bundle.saved_args.preprocessing, "ben_graham")
 
 
 class DataSeparationTests(unittest.TestCase):
