@@ -393,7 +393,7 @@ class ResumeTests(unittest.TestCase):
                     return {"scale": 128.0}
 
             path = Path(temporary_dir) / "checkpoint-last.pth"
-            save_classifier_checkpoint(
+            checkpoint_size = save_classifier_checkpoint(
                 path,
                 model,
                 {"loss": "ce"},
@@ -407,6 +407,7 @@ class ResumeTests(unittest.TestCase):
                 scaler=_Scaler(),
             )
             state = torch.load(path, map_location="cpu", weights_only=False)
+            self.assertEqual(checkpoint_size, path.stat().st_size)
         self.assertEqual(state["best_epoch"], 1)
         self.assertEqual(state["stale_epochs"], 1)
         self.assertEqual(state["scaler"], {"scale": 128.0})

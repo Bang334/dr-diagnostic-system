@@ -1071,7 +1071,7 @@ def run(args: argparse.Namespace) -> None:
         last_path = args.output_dir / "last.pth"
         checkpoint_started_at = time.perf_counter()
         log(f"Saving resumable state to {last_path}...")
-        save_classifier_checkpoint(
+        checkpoint_size = save_classifier_checkpoint(
             last_path,
             model,
             checkpoint_args,
@@ -1087,7 +1087,7 @@ def run(args: argparse.Namespace) -> None:
         log(
             f"Resume checkpoint saved in "
             f"{format_duration(time.perf_counter() - checkpoint_started_at)} "
-            f"({last_path.stat().st_size / 1024**3:.2f} GiB)."
+            f"({checkpoint_size / 1024**3:.2f} GiB)."
         )
         if stale_epochs >= args.patience:
             log(f"Early stopping after {stale_epochs} epochs without QWK improvement.")
