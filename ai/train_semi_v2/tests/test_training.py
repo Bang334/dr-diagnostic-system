@@ -28,6 +28,7 @@ from ai.train_semi_v2.train import (
     parse_args as parse_semi_args,
     prepare_output_dir,
     resume_training_state,
+    train_one_epoch,
     trim_history_for_resume,
     validate_args as validate_semi_args,
 )
@@ -49,6 +50,7 @@ class ArgumentDefaultTests(unittest.TestCase):
         )
         self.assertEqual(args.threshold, 0.95)
         self.assertEqual(args.pseudo_weight, 0.25)
+        self.assertEqual(args.batch_size, 4)
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
         self.assertEqual(args.patience, 3)
@@ -58,6 +60,69 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.max_pseudo_grade_zero, 500)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
+
+
+class _WeightedBatchDataset(Dataset):
+    def __init__(self, sample_weight):
+        self.sample_weight = sample_weight
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, index):
+        return (
+            torch.tensor([1.0, 0.0]),
+            torch.tensor(index % 2),
+            str(index),
+            torch.tensor(self.sample_weight),
+        )
+
+
+class _NoOpScaler:
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        pass
+
+    def step(self, optimizer):
+        optimizer.step()
+
+    def update(self):
+        pass
+
+
+class SampleWeightTests(unittest.TestCase):
+    @staticmethod
+    def _train_loss(sample_weight):
+        torch.manual_seed(0)
+        model = nn.Linear(2, 5)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        loader = DataLoader(
+            _WeightedBatchDataset(sample_weight),
+            batch_size=2,
+            shuffle=False,
+        )
+        return train_one_epoch(
+            model,
+            loader,
+            optimizer,
+            _NoOpScaler(),
+            torch.device("cpu"),
+            accum_steps=1,
+            amp_enabled=False,
+            epoch_number=1,
+        )
+
+    def test_pseudo_weight_scales_an_all_pseudo_batch(self):
+        full_weight_loss = self._train_loss(1.0)
+        pseudo_weight_loss = self._train_loss(0.25)
+
+        self.assertAlmostEqual(
+            pseudo_weight_loss,
+            0.25 * full_weight_loss,
+            places=6,
+        )
 
 
 class PseudoLabelSelectionTests(unittest.TestCase):

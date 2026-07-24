@@ -248,7 +248,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--epochs", type=int, default=6)
     parser.add_argument("--patience", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--accum-steps", type=int, default=8)
     parser.add_argument("--head-lr", type=float, default=1e-5)
     parser.add_argument("--backbone-lr", type=float, default=1e-6)
@@ -487,7 +487,7 @@ def train_one_epoch(
     model.train()
     optimizer.zero_grad(set_to_none=True)
     total_weighted_loss = 0.0
-    total_weight = 0.0
+    total_samples = 0
     total_batches = len(loader)
     started_at = time.perf_counter()
     for step, (images, labels, _, sample_weights) in enumerate(
@@ -504,7 +504,7 @@ def train_one_epoch(
                 reduction="none",
                 label_smoothing=0.05,
             )
-            loss = (per_sample * sample_weights).sum() / sample_weights.sum().clamp_min(1e-8)
+            loss = (per_sample * sample_weights).mean()
         scaler.scale(loss / accum_steps).backward()
         should_step = (step + 1) % accum_steps == 0 or step + 1 == len(loader)
         if should_step:
@@ -514,11 +514,11 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
         total_weighted_loss += float((per_sample.detach() * sample_weights).sum())
-        total_weight += float(sample_weights.sum())
+        total_samples += int(per_sample.numel())
         batch_number = step + 1
         if should_log_progress(batch_number, total_batches, updates=20):
             elapsed = format_duration(time.perf_counter() - started_at)
-            average_loss = total_weighted_loss / max(total_weight, 1e-8)
+            average_loss = total_weighted_loss / max(total_samples, 1)
             log(
                 f"Epoch {epoch_number} train: batch {batch_number}/{total_batches} "
                 f"({100.0 * batch_number / max(total_batches, 1):.1f}%), "
@@ -527,7 +527,7 @@ def train_one_epoch(
                 f"{optimizer.param_groups[-1]['lr']:.2e}, elapsed={elapsed}, "
                 f"{gpu_memory_summary()}"
             )
-    return total_weighted_loss / max(total_weight, 1e-8)
+    return total_weighted_loss / max(total_samples, 1)
 
 
 def evaluate_held_out_test(
