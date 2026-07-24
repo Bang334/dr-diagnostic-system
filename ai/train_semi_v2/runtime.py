@@ -416,7 +416,7 @@ def save_classifier_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
     scaler: Optional[Any] = None,
-) -> int:
+) -> Optional[int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     state: Dict[str, Any] = {
         "model": model.state_dict(),
@@ -435,8 +435,8 @@ def save_classifier_checkpoint(
         state["best_epoch"] = int(best_epoch)
     if stale_epochs is not None:
         state["stale_epochs"] = int(stale_epochs)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    torch.save(state, temporary_path)
-    checkpoint_size = temporary_path.stat().st_size
-    temporary_path.replace(path)
-    return checkpoint_size
+    torch.save(state, path)
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None

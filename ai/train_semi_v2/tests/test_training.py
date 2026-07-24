@@ -408,6 +408,7 @@ class ResumeTests(unittest.TestCase):
             )
             state = torch.load(path, map_location="cpu", weights_only=False)
             self.assertEqual(checkpoint_size, path.stat().st_size)
+            self.assertFalse(path.with_suffix(path.suffix + ".tmp").exists())
         self.assertEqual(state["best_epoch"], 1)
         self.assertEqual(state["stale_epochs"], 1)
         self.assertEqual(state["scaler"], {"scale": 128.0})

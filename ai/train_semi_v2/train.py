@@ -1084,10 +1084,15 @@ def run(args: argparse.Namespace) -> None:
             scheduler=scheduler,
             scaler=scaler,
         )
+        checkpoint_size_message = (
+            f"{checkpoint_size / 1024**3:.2f} GiB"
+            if checkpoint_size is not None
+            else "size unavailable"
+        )
         log(
             f"Resume checkpoint saved in "
             f"{format_duration(time.perf_counter() - checkpoint_started_at)} "
-            f"({checkpoint_size / 1024**3:.2f} GiB)."
+            f"({checkpoint_size_message})."
         )
         if stale_epochs >= args.patience:
             log(f"Early stopping after {stale_epochs} epochs without QWK improvement.")
