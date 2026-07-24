@@ -119,6 +119,25 @@ def limit_labeled_replay(
     )
 
 
+def cap_pseudo_grade_zero(
+    frame: pd.DataFrame, *, max_grade_zero: int
+) -> pd.DataFrame:
+    """Keep the most confident grade-0 predictions without limiting grades 1..4."""
+    if max_grade_zero == 0 or frame.empty:
+        return frame.reset_index(drop=True).copy()
+    grade_zero = (
+        frame.loc[frame["pseudo_label"] == 0]
+        .sort_values("confidence", ascending=False)
+        .head(max_grade_zero)
+    )
+    diseased = frame.loc[frame["pseudo_label"] != 0]
+    return (
+        pd.concat([grade_zero, diseased], ignore_index=True)
+        .sort_values(["pseudo_label", "confidence"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+
 def limit_unlabeled_paths(
     paths: List[Path], *, max_images: int, seed: int
 ) -> List[Path]:
@@ -241,6 +260,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=0,
         help="Keep the most confident N images per class; use 0 for no cap",
     )
+    parser.add_argument(
+        "--max-pseudo-grade-zero",
+        type=int,
+        default=0,
+        help=(
+            "After loading or generating predictions, keep only the most confident "
+            "N grade-0 pseudo-labels while retaining every grade 1..4; use 0 for all"
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -273,6 +301,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--batch-size and --accum-steps must be positive")
     if args.max_pseudo_per_class < 0:
         raise ValueError("--max-pseudo-per-class cannot be negative")
+    if args.max_pseudo_grade_zero < 0:
+        raise ValueError("--max-pseudo-grade-zero cannot be negative")
     if args.max_unlabeled_images < 0:
         raise ValueError("--max-unlabeled-images cannot be negative")
     if args.max_labeled_per_class < 0:
@@ -729,6 +759,19 @@ def run(args: argparse.Namespace) -> None:
             )
         else:
             pseudo_frame = predict_pseudo_labels()
+        unfiltered_counts = (
+            pseudo_frame["pseudo_label"].value_counts().sort_index().to_dict()
+        )
+        pseudo_frame = cap_pseudo_grade_zero(
+            pseudo_frame, max_grade_zero=args.max_pseudo_grade_zero
+        )
+        if args.max_pseudo_grade_zero > 0:
+            log(
+                "Applied post-cache grade-0 cap without repeating inference: "
+                f"max_grade_zero={args.max_pseudo_grade_zero}, "
+                f"before={unfiltered_counts}, "
+                f"after={pseudo_frame['pseudo_label'].value_counts().sort_index().to_dict()}."
+            )
         if pseudo_frame.empty:
             raise RuntimeError(
                 "No pseudo-label passed the confidence threshold; lower --threshold "

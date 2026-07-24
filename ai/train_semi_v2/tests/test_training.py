@@ -21,6 +21,7 @@ from ai.train_semi_v2.runtime import (
     save_classifier_checkpoint,
 )
 from ai.train_semi_v2.train import (
+    cap_pseudo_grade_zero,
     generate_pseudo_labels,
     limit_labeled_replay,
     limit_unlabeled_paths,
@@ -54,8 +55,32 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.max_unlabeled_images, 0)
         self.assertEqual(args.max_labeled_per_class, 0)
         self.assertEqual(args.max_pseudo_per_class, 0)
+        self.assertEqual(args.max_pseudo_grade_zero, 0)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
+
+
+class PseudoLabelSelectionTests(unittest.TestCase):
+    def test_caps_only_grade_zero_and_keeps_highest_confidence(self):
+        frame = pd.DataFrame(
+            {
+                "image_path": ["zero-low", "one", "zero-high", "two", "zero-mid"],
+                "pseudo_label": [0, 1, 0, 2, 0],
+                "confidence": [0.95, 0.96, 0.99, 0.97, 0.98],
+            }
+        )
+
+        selected = cap_pseudo_grade_zero(frame, max_grade_zero=2)
+
+        self.assertEqual(
+            selected["pseudo_label"].value_counts().sort_index().to_dict(),
+            {0: 2, 1: 1, 2: 1},
+        )
+        self.assertEqual(
+            set(selected.loc[selected["pseudo_label"] == 0, "image_path"]),
+            {"zero-high", "zero-mid"},
+        )
+        self.assertEqual(len(frame), 5)
 
     def test_eval_only_requires_resume_checkpoint(self):
         args = parse_semi_args(

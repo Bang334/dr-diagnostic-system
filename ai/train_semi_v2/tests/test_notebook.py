@@ -57,6 +57,11 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("legacy_log.replace(external_log)", self.source)
         self.assertNotIn("OUTPUT_DIR.mkdir(parents=True, exist_ok=True)", self.source)
 
+    def test_caps_only_grade_zero_after_reusing_predictions(self):
+        self.assertIn("'max_pseudo_grade_zero': 500", self.source)
+        self.assertIn("--max-pseudo-grade-zero", self.source)
+        self.assertIn("grade0cap500", self.source)
+
     def test_does_not_embed_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)
