@@ -17,31 +17,39 @@ from typing import Callable, Iterable
 import pandas as pd
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 PSEUDO_COLUMNS = ("image_path", "pseudo_label", "confidence")
 
 
-def _file_identity(path: Path) -> dict[str, object]:
+def _stable_file_identity(path: Path) -> dict[str, object]:
     resolved = path.expanduser().resolve()
     stat = resolved.stat()
     return {
-        "path": os.fspath(resolved),
+        "name": resolved.name,
         "size": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
     }
 
 
 def _manifest_digest(paths: Iterable[Path]) -> tuple[str, int]:
+    resolved_paths = tuple(Path(item).expanduser().resolve() for item in paths)
+    if not resolved_paths:
+        return hashlib.sha256(b"").hexdigest(), 0
+    common_root = Path(os.path.commonpath([os.fspath(path.parent) for path in resolved_paths]))
     digest = hashlib.sha256()
-    count = 0
-    for path in sorted((Path(item).expanduser().resolve() for item in paths), key=os.fspath):
-        identity = _file_identity(path)
+    entries = []
+    for path in resolved_paths:
+        entries.append(
+            {
+                "relative_path": path.relative_to(common_root).as_posix(),
+                "size": int(path.stat().st_size),
+            }
+        )
+    for identity in sorted(entries, key=lambda item: str(item["relative_path"])):
         digest.update(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
         digest.update(b"\n")
-        count += 1
-    return digest.hexdigest(), count
+    return digest.hexdigest(), len(entries)
 
 
 @dataclass(frozen=True)
@@ -61,7 +69,7 @@ class PseudoLabelCacheSpec:
         return {
             "schema_version": CACHE_SCHEMA_VERSION,
             "threshold": float(self.threshold),
-            "teacher_checkpoint": _file_identity(self.teacher_checkpoint),
+            "teacher_checkpoint": _stable_file_identity(self.teacher_checkpoint),
             "unlabeled_manifest_sha256": manifest_sha256,
             "unlabeled_image_count": image_count,
             "preprocessing": self.preprocessing,
@@ -94,18 +102,66 @@ class PseudoLabelCache:
         contract = spec.contract()
         serialized = json.dumps(contract, sort_keys=True, separators=(",", ":"))
         cache_key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-        stem = f"pseudo-labels-{cache_key[:20]}"
-        csv_path = self.cache_dir / f"{stem}.csv"
-        metadata_path = self.cache_dir / f"{stem}.json"
+        csv_path = self.cache_dir / "pseudo-labels.csv"
+        metadata_path = self.cache_dir / "pseudo-labels.json"
 
         if csv_path.is_file() and metadata_path.is_file():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if metadata.get("cache_key") == cache_key and metadata.get("contract") == contract:
+            if self._metadata_matches(metadata, contract, cache_key):
                 frame = self._read_frame(csv_path)
+                if metadata.get("cache_key") != cache_key:
+                    self._write_cache(frame, csv_path, metadata_path, contract, cache_key)
                 return CacheResult(frame, True, csv_path, metadata_path, cache_key)
 
         frame = self._validate_frame(generator())
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._write_cache(frame, csv_path, metadata_path, contract, cache_key)
+        return CacheResult(frame, False, csv_path, metadata_path, cache_key)
+
+    @staticmethod
+    def _metadata_matches(
+        metadata: dict[str, object],
+        contract: dict[str, object],
+        cache_key: str,
+    ) -> bool:
+        saved = metadata.get("contract")
+        if not isinstance(saved, dict):
+            return False
+        if metadata.get("cache_key") == cache_key and saved == contract:
+            return True
+        # Compatibility with the original Colab cache. Schema v1 included
+        # absolute /content paths and mtimes, both of which change whenever a
+        # runtime downloads the same files again.
+        if saved.get("schema_version") != 1:
+            return False
+        stable_fields = (
+            "threshold",
+            "unlabeled_image_count",
+            "preprocessing",
+            "image_size",
+            "max_pseudo_per_class",
+            "enhance",
+        )
+        if any(saved.get(field) != contract.get(field) for field in stable_fields):
+            return False
+        old_teacher = saved.get("teacher_checkpoint")
+        new_teacher = contract.get("teacher_checkpoint")
+        if not isinstance(old_teacher, dict) or not isinstance(new_teacher, dict):
+            return False
+        return (
+            Path(str(old_teacher.get("path", ""))).name == new_teacher.get("name")
+            and old_teacher.get("size") == new_teacher.get("size")
+        )
+
+    @staticmethod
+    def _write_cache(
+        frame: pd.DataFrame,
+        csv_path: Path,
+        metadata_path: Path,
+        contract: dict[str, object],
+        cache_key: str,
+    ) -> None:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_csv = csv_path.with_suffix(".csv.tmp")
         temporary_metadata = metadata_path.with_suffix(".json.tmp")
         frame.to_csv(temporary_csv, index=False)
@@ -121,7 +177,6 @@ class PseudoLabelCache:
         )
         temporary_csv.replace(csv_path)
         temporary_metadata.replace(metadata_path)
-        return CacheResult(frame, False, csv_path, metadata_path, cache_key)
 
     @staticmethod
     def _read_frame(path: Path) -> pd.DataFrame:

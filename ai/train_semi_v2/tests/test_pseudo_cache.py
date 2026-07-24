@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,6 +98,75 @@ class PseudoLabelCacheTests(unittest.TestCase):
 
         self.assertEqual(calls, ["called", "called"])
         self.assertNotEqual(first.cache_key, second.cache_key)
+
+    def test_recreated_colab_runtime_reuses_equivalent_cache(self):
+        calls = []
+
+        def generate():
+            calls.append("called")
+            return self.frame()
+
+        first = self.cache.load_or_generate(self.spec(), generate)
+
+        recreated_root = self.root / "new-colab-runtime"
+        recreated_root.mkdir()
+        recreated_checkpoint = recreated_root / self.checkpoint.name
+        recreated_checkpoint.write_bytes(self.checkpoint.read_bytes())
+        recreated_images = tuple(
+            recreated_root / image.name for image in self.images
+        )
+        for source, destination in zip(self.images, recreated_images):
+            destination.write_bytes(source.read_bytes())
+
+        recreated_spec = PseudoLabelCacheSpec(
+            threshold=0.95,
+            teacher_checkpoint=recreated_checkpoint,
+            unlabeled_paths=recreated_images,
+            preprocessing="rgb_crop",
+            image_size=224,
+            max_pseudo_per_class=0,
+            enhance=False,
+        )
+        second = self.cache.load_or_generate(recreated_spec, generate)
+
+        self.assertFalse(first.reused)
+        self.assertTrue(second.reused)
+        self.assertEqual(calls, ["called"])
+
+    def test_renamed_schema_v1_files_are_reused_and_migrated(self):
+        cache_dir = self.root / "cache"
+        cache_dir.mkdir()
+        self.frame().to_csv(cache_dir / "pseudo-labels.csv", index=False)
+        old_contract = {
+            "schema_version": 1,
+            "threshold": 0.95,
+            "teacher_checkpoint": {
+                "path": str(self.checkpoint.resolve()),
+                "size": self.checkpoint.stat().st_size,
+                "mtime_ns": self.checkpoint.stat().st_mtime_ns,
+            },
+            "unlabeled_manifest_sha256": "old-runtime-dependent-digest",
+            "unlabeled_image_count": len(self.images),
+            "preprocessing": "rgb_crop",
+            "image_size": 224,
+            "max_pseudo_per_class": 0,
+            "enhance": False,
+        }
+        (cache_dir / "pseudo-labels.json").write_text(
+            json.dumps({"cache_key": "old-key", "contract": old_contract}),
+            encoding="utf-8",
+        )
+
+        def must_not_generate():
+            self.fail("Schema v1 cache should be reused")
+
+        result = self.cache.load_or_generate(self.spec(), must_not_generate)
+
+        self.assertTrue(result.reused)
+        migrated = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["contract"]["schema_version"], 2)
+        self.assertEqual(result.csv_path.name, "pseudo-labels.csv")
+        self.assertEqual(result.metadata_path.name, "pseudo-labels.json")
 
 
 class TrainV2ArgumentTests(unittest.TestCase):
