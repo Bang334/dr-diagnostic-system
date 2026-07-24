@@ -249,7 +249,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=6)
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--accum-steps", type=int, default=8)
+    parser.add_argument("--accum-steps", type=int, default=4)
     parser.add_argument("--head-lr", type=float, default=1e-5)
     parser.add_argument("--backbone-lr", type=float, default=1e-6)
     parser.add_argument("--min-lr", type=float, default=1e-7)

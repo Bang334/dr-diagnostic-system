@@ -51,6 +51,7 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.threshold, 0.95)
         self.assertEqual(args.pseudo_weight, 0.25)
         self.assertEqual(args.batch_size, 4)
+        self.assertEqual(args.accum_steps, 4)
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
         self.assertEqual(args.patience, 3)

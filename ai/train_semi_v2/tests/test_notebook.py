@@ -62,6 +62,12 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("--max-pseudo-grade-zero", self.source)
         self.assertIn("RUN_NAME = 'run'", self.source)
 
+    def test_uses_batch_four_and_preserves_effective_batch_size(self):
+        self.assertIn("'batch_size': 4", self.source)
+        self.assertIn("'accum_steps': 4", self.source)
+        self.assertIn("--batch-size", self.source)
+        self.assertIn("--accum-steps", self.source)
+
     def test_does_not_embed_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")
         self.assertNotIn("ghp_", raw)
