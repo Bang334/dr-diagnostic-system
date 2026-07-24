@@ -93,6 +93,8 @@ class PseudoLabelCache:
 
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir.expanduser().resolve()
+        self.progress_path = self.cache_dir / "progress.csv"
+        self.progress_metadata_path = self.cache_dir / "work.json"
 
     def load_or_generate(
         self,
@@ -102,8 +104,8 @@ class PseudoLabelCache:
         contract = spec.contract()
         serialized = json.dumps(contract, sort_keys=True, separators=(",", ":"))
         cache_key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-        csv_path = self.cache_dir / "pseudo-labels.csv"
-        metadata_path = self.cache_dir / "pseudo-labels.json"
+        csv_path = self.cache_dir / "labels.csv"
+        metadata_path = self.cache_dir / "meta.json"
 
         if csv_path.is_file() and metadata_path.is_file():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -113,10 +115,40 @@ class PseudoLabelCache:
                     self._write_cache(frame, csv_path, metadata_path, contract, cache_key)
                 return CacheResult(frame, True, csv_path, metadata_path, cache_key)
 
+        self._prepare_progress(contract, cache_key)
         frame = self._validate_frame(generator())
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._write_cache(frame, csv_path, metadata_path, contract, cache_key)
+        self.progress_path.unlink(missing_ok=True)
+        self.progress_metadata_path.unlink(missing_ok=True)
         return CacheResult(frame, False, csv_path, metadata_path, cache_key)
+
+    def _prepare_progress(
+        self, contract: dict[str, object], cache_key: str
+    ) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        matching = False
+        if self.progress_metadata_path.is_file():
+            try:
+                saved = json.loads(
+                    self.progress_metadata_path.read_text(encoding="utf-8")
+                )
+                matching = (
+                    saved.get("cache_key") == cache_key
+                    and saved.get("contract") == contract
+                )
+            except (OSError, ValueError, TypeError):
+                matching = False
+        if not matching:
+            self.progress_path.unlink(missing_ok=True)
+        self.progress_metadata_path.write_text(
+            json.dumps(
+                {"cache_key": cache_key, "contract": contract},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _metadata_matches(

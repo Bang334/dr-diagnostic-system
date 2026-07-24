@@ -55,7 +55,7 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.max_unlabeled_images, 0)
         self.assertEqual(args.max_labeled_per_class, 0)
         self.assertEqual(args.max_pseudo_per_class, 0)
-        self.assertEqual(args.max_pseudo_grade_zero, 0)
+        self.assertEqual(args.max_pseudo_grade_zero, 500)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
 
@@ -192,9 +192,18 @@ class DataSeparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             output = Path(temporary_dir) / "run"
             output.mkdir()
-            checkpoint = output / "checkpoint-last.pth"
+            checkpoint = output / "last.pth"
             checkpoint.write_bytes(b"checkpoint")
             prepared = prepare_output_dir(output, checkpoint)
+        self.assertEqual(prepared, output.resolve())
+
+    def test_fresh_command_can_continue_pretraining_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output = Path(temporary_dir) / "run"
+            output.mkdir()
+            (output / "scan.csv").write_text("image_path\n", encoding="utf-8")
+            (output / "train.log").write_text("interrupted", encoding="utf-8")
+            prepared = prepare_output_dir(output, None)
         self.assertEqual(prepared, output.resolve())
 
 
@@ -402,6 +411,43 @@ class PseudoLabelTests(unittest.TestCase):
         self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 2)
         self.assertGreater(float(frame.iloc[0]["confidence"]), 0.95)
         self.assertIn("Pseudo-label progress: image 1/2", output.getvalue())
+
+    def test_resumes_partial_prediction_without_reprocessing_saved_images(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            first_path = str((root / "0.jpg").resolve())
+            progress_path = root / "progress.csv"
+            pd.DataFrame(
+                [{
+                    "image_path": first_path,
+                    "pseudo_label": 2,
+                    "confidence": 0.99,
+                    "accepted": True,
+                }]
+            ).to_csv(progress_path, index=False)
+
+            class CountingModel(_ConfidenceModel):
+                seen = 0
+
+                def forward(self, images):
+                    self.seen += images.size(0)
+                    return super().forward(images)
+
+            model = CountingModel()
+            loader = DataLoader(_PseudoDataset(root), batch_size=2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                frame = generate_pseudo_labels(
+                    model,
+                    loader,
+                    torch.device("cpu"),
+                    threshold=0.95,
+                    max_per_class=0,
+                    amp_enabled=False,
+                    progress_path=progress_path,
+                )
+
+        self.assertEqual(model.seen, 1)
+        self.assertEqual(len(frame), 1)
 
 
 if __name__ == "__main__":

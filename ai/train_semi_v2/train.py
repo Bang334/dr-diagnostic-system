@@ -153,6 +153,20 @@ def prepare_output_dir(output_dir: Path, resume: Optional[Path]) -> Path:
     """Allow a non-empty run directory only for a checkpoint inside that run."""
     output_dir = output_dir.expanduser().resolve()
     if resume is None:
+        restartable = {
+            "train.log",
+            "replay.csv",
+            "scan.csv",
+            "cache.json",
+            "pseudo.csv",
+            "baseline.json",
+            "best.pth",
+            "history.jsonl",
+        }
+        if output_dir.is_dir():
+            existing = {path.name for path in output_dir.iterdir()}
+            if existing and existing.issubset(restartable):
+                return output_dir
         return prepare_fresh_output_dir(output_dir)
     resume = resume.expanduser().resolve()
     if not resume.is_file():
@@ -263,7 +277,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-pseudo-grade-zero",
         type=int,
-        default=0,
+        default=500,
         help=(
             "After loading or generating predictions, keep only the most confident "
             "N grade-0 pseudo-labels while retaining every grade 1..4; use 0 for all"
@@ -286,7 +300,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-amp", action="store_true")
     args = parser.parse_args(argv)
     if args.pseudo_cache_dir is None:
-        args.pseudo_cache_dir = args.output_dir.parent / "pseudo-label-cache-v2"
+        args.pseudo_cache_dir = args.output_dir.parent / "cache"
     return args
 
 
@@ -309,7 +323,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-labeled-per-class cannot be negative")
     if args.eval_only and args.resume is None:
         raise ValueError("--eval-only requires --resume CHECKPOINT")
-    output_checkpoint = (args.output_dir / "checkpoint-best.pth").resolve()
+    output_checkpoint = (args.output_dir / "best.pth").resolve()
     if output_checkpoint == args.checkpoint.expanduser().resolve():
         raise ValueError(
             "--output-dir would overwrite the parent checkpoint; choose a new run directory"
@@ -341,11 +355,24 @@ def generate_pseudo_labels(
     threshold: float,
     max_per_class: int,
     amp_enabled: bool,
+    progress_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     model.eval()
-    records: List[Dict[str, Any]] = []
+    progress_columns = ["image_path", "pseudo_label", "confidence", "accepted"]
+    progress_records: List[Dict[str, Any]] = []
+    if progress_path is not None and progress_path.is_file():
+        saved_progress = pd.read_csv(progress_path, on_bad_lines="skip")
+        if set(progress_columns).issubset(saved_progress.columns):
+            saved_progress = saved_progress.drop_duplicates("image_path", keep="last")
+            progress_records = saved_progress[progress_columns].to_dict("records")
+            log(f"Resuming pseudo-label inference: already processed={len(progress_records):,}.")
+    processed_paths = {str(record["image_path"]) for record in progress_records}
+    accepted_count = sum(
+        str(record["accepted"]).strip().lower() == "true"
+        for record in progress_records
+    )
     total_images = len(loader.dataset)
-    processed_images = 0
+    processed_images = len(processed_paths)
     started_at = time.perf_counter()
     progress = tqdm(
         total=total_images,
@@ -356,39 +383,72 @@ def generate_pseudo_labels(
         file=sys.stdout,
         leave=True,
     )
+    progress.update(min(processed_images, total_images))
     try:
         for images, paths in loader:
-            images = images.to(device, non_blocking=True)
+            resolved_paths = [os.fspath(Path(path).resolve()) for path in paths]
+            pending_indices = [
+                index for index, path in enumerate(resolved_paths)
+                if path not in processed_paths
+            ]
+            if not pending_indices:
+                continue
+            images = images[pending_indices].to(device, non_blocking=True)
             with torch.amp.autocast("cuda", enabled=amp_enabled):
                 probabilities = torch.softmax(model(images), dim=1)
             confidence, labels = probabilities.max(dim=1)
-            for path, label, score in zip(paths, labels.cpu(), confidence.cpu()):
-                if float(score) >= threshold:
-                    records.append(
-                        {
-                            "image_path": os.fspath(Path(path).resolve()),
-                            "pseudo_label": int(label),
-                            "confidence": float(score),
-                        }
-                    )
+            batch_records = []
+            pending_paths = [resolved_paths[index] for index in pending_indices]
+            for path, label, score in zip(
+                pending_paths, labels.cpu(), confidence.cpu()
+            ):
+                accepted = float(score) >= threshold
+                batch_records.append(
+                    {
+                        "image_path": path,
+                        "pseudo_label": int(label),
+                        "confidence": float(score),
+                        "accepted": accepted,
+                    }
+                )
+                processed_paths.add(path)
                 processed_images += 1
+                accepted_count += int(accepted)
                 progress.update(1)
-                progress.set_postfix(accepted=len(records), refresh=False)
+                progress.set_postfix(accepted=accepted_count, refresh=False)
                 if should_log_progress(processed_images, total_images):
                     elapsed = format_duration(time.perf_counter() - started_at)
                     percent = 100.0 * processed_images / max(total_images, 1)
                     log(
                         "Pseudo-label progress: "
                         f"image {processed_images}/{total_images} ({percent:.1f}%), "
-                        f"accepted_so_far={len(records):,}, elapsed={elapsed}, "
+                        f"accepted_so_far={accepted_count:,}, elapsed={elapsed}, "
                         f"{gpu_memory_summary()}"
                     )
+            progress_records.extend(batch_records)
+            if progress_path is not None:
+                pd.DataFrame(batch_records, columns=progress_columns).to_csv(
+                    progress_path,
+                    mode="a",
+                    header=not progress_path.exists(),
+                    index=False,
+                )
     finally:
         progress.close()
 
-    frame = pd.DataFrame.from_records(
-        records, columns=["image_path", "pseudo_label", "confidence"]
+    all_predictions = pd.DataFrame.from_records(
+        progress_records, columns=progress_columns
+    ).drop_duplicates("image_path", keep="last")
+    accepted_values = all_predictions["accepted"]
+    accepted_mask = (
+        accepted_values
+        if accepted_values.dtype == bool
+        else accepted_values.astype(str).str.lower().eq("true")
     )
+    frame = all_predictions.loc[
+        accepted_mask,
+        ["image_path", "pseudo_label", "confidence"],
+    ].copy()
     if frame.empty:
         return frame
     frame = frame.sort_values("confidence", ascending=False)
@@ -534,7 +594,7 @@ def run(args: argparse.Namespace) -> None:
     run_started_at = time.perf_counter()
     validate_args(args)
     args.output_dir = prepare_output_dir(args.output_dir, args.resume)
-    configure_log_file(args.output_dir / "training.log")
+    configure_log_file(args.output_dir / "train.log")
     log("[1/7] Arguments validated and run directory prepared.")
     seed_everything(args.seed)
 
@@ -574,11 +634,11 @@ def run(args: argparse.Namespace) -> None:
 
     train_transform, eval_transform = build_transforms(image_size)
     data_args = _dataset_args(saved_args, args)
-    replay_manifest_path = args.output_dir / "labeled_replay_manifest.csv"
-    unlabeled_manifest_path = args.output_dir / "unlabeled_scan_manifest.csv"
-    pseudo_path = args.output_dir / "pseudo_labels.csv"
-    pseudo_cache_record_path = args.output_dir / "pseudo_cache_record.json"
-    baseline_path = args.output_dir / "baseline_metrics.json"
+    replay_manifest_path = args.output_dir / "replay.csv"
+    unlabeled_manifest_path = args.output_dir / "scan.csv"
+    pseudo_path = args.output_dir / "pseudo.csv"
+    pseudo_cache_record_path = args.output_dir / "cache.json"
+    baseline_path = args.output_dir / "baseline.json"
 
     if resume_state is not None:
         if not pseudo_path.is_file():
@@ -712,6 +772,12 @@ def run(args: argparse.Namespace) -> None:
             f"max_per_class={args.max_pseudo_per_class}, "
             f"images={selected_unlabeled_count:,}."
         )
+        cache = (
+            PseudoLabelCache(args.pseudo_cache_dir)
+            if args.pseudo_cache_dir is not None
+            else None
+        )
+
         def predict_pseudo_labels() -> pd.DataFrame:
             return generate_pseudo_labels(
                 model,
@@ -720,11 +786,11 @@ def run(args: argparse.Namespace) -> None:
                 threshold=args.threshold,
                 max_per_class=args.max_pseudo_per_class,
                 amp_enabled=amp_enabled,
+                progress_path=cache.progress_path if cache is not None else None,
             )
 
-        if args.pseudo_cache_dir is not None:
+        if cache is not None:
             preprocessing = str(getattr(saved_args, "preprocessing", "rgb_crop"))
-            cache = PseudoLabelCache(args.pseudo_cache_dir)
             cache_result = cache.load_or_generate(
                 PseudoLabelCacheSpec(
                     threshold=args.threshold,
@@ -854,7 +920,7 @@ def run(args: argparse.Namespace) -> None:
         }
         checkpoint_args = checkpoint_args_with_metadata(saved_args, metadata)
         save_classifier_checkpoint(
-            args.output_dir / "checkpoint-best.pth",
+            args.output_dir / "best.pth",
             model,
             checkpoint_args,
             epoch=-1,
@@ -983,7 +1049,7 @@ def run(args: argparse.Namespace) -> None:
             best_qwk = current_qwk
             best_epoch = epoch
             stale_epochs = 0
-            best_path = args.output_dir / "checkpoint-best.pth"
+            best_path = args.output_dir / "best.pth"
             log(f"QWK improved to {best_qwk:.6f}; saving {best_path}...")
             save_classifier_checkpoint(
                 best_path,
@@ -1002,7 +1068,7 @@ def run(args: argparse.Namespace) -> None:
                 f"patience={stale_epochs}/{args.patience}."
             )
         scheduler.step()
-        last_path = args.output_dir / "checkpoint-last.pth"
+        last_path = args.output_dir / "last.pth"
         checkpoint_started_at = time.perf_counter()
         log(f"Saving resumable state to {last_path}...")
         save_classifier_checkpoint(
@@ -1050,7 +1116,7 @@ def run(args: argparse.Namespace) -> None:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
     log(
         f"Training run finished in {format_duration(time.perf_counter() - run_started_at)}. "
-        f"Run --eval-only with checkpoint-best.pth for the final held-out test."
+        f"Run --eval-only with best.pth for the final held-out test."
     )
     log("Summary:\n" + json.dumps(summary, indent=2, ensure_ascii=False))
 
@@ -1060,7 +1126,7 @@ def main() -> None:
         run(parse_args())
     except KeyboardInterrupt:
         log(
-            "Training interrupted by user. checkpoint-last.pth from the most "
+            "Training interrupted by user. last.pth from the most "
             "recent fully completed epoch remains safe; use --resume to continue."
         )
         raise SystemExit(130)

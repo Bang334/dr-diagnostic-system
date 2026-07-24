@@ -16,12 +16,12 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
 
     def test_contains_complete_new_resume_and_test_workflow(self):
         self.assertIn("ai.train_semi_v2.train", self.source)
-        self.assertIn("# TRAIN NEW", self.source)
+        self.assertIn("# TRAIN OR RESUME", self.source)
         self.assertIn("# RESUME SEMI V2", self.source)
         self.assertIn("--resume", self.source)
         self.assertIn("--eval-only", self.source)
-        self.assertIn("checkpoint-last.pth", self.source)
-        self.assertIn("checkpoint-best.pth", self.source)
+        self.assertIn("last.pth", self.source)
+        self.assertIn("best.pth", self.source)
 
     def test_uses_shared_cache_and_explains_invalidation(self):
         self.assertIn("--pseudo-cache-dir", self.source)
@@ -49,18 +49,18 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("subprocess.Popen", self.source)
         self.assertIn("stderr=subprocess.STDOUT", self.source)
         self.assertIn("KeyboardInterrupt", self.source)
-        self.assertIn("checkpoint-last.pth của epoch hoàn tất gần nhất", self.source)
+        self.assertIn("progress.csv hoặc last.pth", self.source)
 
     def test_fresh_run_log_does_not_make_output_directory_nonempty(self):
         self.assertIn("is_fresh_run = '--resume' not in command", self.source)
         self.assertIn("DRIVE_ROOT / f'{RUN_NAME}-{log_name}'", self.source)
-        self.assertIn("legacy_log.replace(external_log)", self.source)
+        self.assertIn("LAST_CHECKPOINT.is_file()", self.source)
         self.assertNotIn("OUTPUT_DIR.mkdir(parents=True, exist_ok=True)", self.source)
 
     def test_caps_only_grade_zero_after_reusing_predictions(self):
         self.assertIn("'max_pseudo_grade_zero': 500", self.source)
         self.assertIn("--max-pseudo-grade-zero", self.source)
-        self.assertIn("grade0cap500", self.source)
+        self.assertIn("RUN_NAME = 'run'", self.source)
 
     def test_does_not_embed_tokens(self):
         raw = NOTEBOOK.read_text(encoding="utf-8")

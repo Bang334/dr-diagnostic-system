@@ -136,7 +136,7 @@ class PseudoLabelCacheTests(unittest.TestCase):
     def test_renamed_schema_v1_files_are_reused_and_migrated(self):
         cache_dir = self.root / "cache"
         cache_dir.mkdir()
-        self.frame().to_csv(cache_dir / "pseudo-labels.csv", index=False)
+        self.frame().to_csv(cache_dir / "labels.csv", index=False)
         old_contract = {
             "schema_version": 1,
             "threshold": 0.95,
@@ -152,7 +152,7 @@ class PseudoLabelCacheTests(unittest.TestCase):
             "max_pseudo_per_class": 0,
             "enhance": False,
         }
-        (cache_dir / "pseudo-labels.json").write_text(
+        (cache_dir / "meta.json").write_text(
             json.dumps({"cache_key": "old-key", "contract": old_contract}),
             encoding="utf-8",
         )
@@ -165,8 +165,8 @@ class PseudoLabelCacheTests(unittest.TestCase):
         self.assertTrue(result.reused)
         migrated = json.loads(result.metadata_path.read_text(encoding="utf-8"))
         self.assertEqual(migrated["contract"]["schema_version"], 2)
-        self.assertEqual(result.csv_path.name, "pseudo-labels.csv")
-        self.assertEqual(result.metadata_path.name, "pseudo-labels.json")
+        self.assertEqual(result.csv_path.name, "labels.csv")
+        self.assertEqual(result.metadata_path.name, "meta.json")
 
 
 class TrainV2ArgumentTests(unittest.TestCase):
@@ -185,7 +185,7 @@ class TrainV2ArgumentTests(unittest.TestCase):
         )
         self.assertEqual(
             args.pseudo_cache_dir,
-            Path("runs/pseudo-label-cache-v2"),
+            Path("runs/cache"),
         )
 
     def test_explicit_cache_directory_is_preserved(self):
