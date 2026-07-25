@@ -23,9 +23,9 @@ class PseudoLabelCacheTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_dir.cleanup()
 
-    def spec(self, threshold=0.95):
+    def spec(self, grade_thresholds=(0.95, 0.95, 0.95, 0.95, 0.95)):
         return PseudoLabelCacheSpec(
-            threshold=threshold,
+            grade_thresholds=grade_thresholds,
             teacher_checkpoint=self.checkpoint,
             unlabeled_paths=self.images,
             preprocessing="rgb_crop",
@@ -65,8 +65,12 @@ class PseudoLabelCacheTests(unittest.TestCase):
             calls.append("called")
             return self.frame()
 
-        first = self.cache.load_or_generate(self.spec(0.95), generate)
-        second = self.cache.load_or_generate(self.spec(0.90), generate)
+        first = self.cache.load_or_generate(
+            self.spec((0.95, 0.95, 0.95, 0.95, 0.95)), generate
+        )
+        second = self.cache.load_or_generate(
+            self.spec((0.95, 0.90, 0.95, 0.95, 0.95)), generate
+        )
 
         self.assertEqual(calls, ["called", "called"])
         self.assertNotEqual(first.cache_key, second.cache_key)
@@ -119,7 +123,7 @@ class PseudoLabelCacheTests(unittest.TestCase):
             destination.write_bytes(source.read_bytes())
 
         recreated_spec = PseudoLabelCacheSpec(
-            threshold=0.95,
+            grade_thresholds=(0.95, 0.95, 0.95, 0.95, 0.95),
             teacher_checkpoint=recreated_checkpoint,
             unlabeled_paths=recreated_images,
             preprocessing="rgb_crop",
@@ -133,7 +137,7 @@ class PseudoLabelCacheTests(unittest.TestCase):
         self.assertTrue(second.reused)
         self.assertEqual(calls, ["called"])
 
-    def test_renamed_schema_v1_files_are_reused_and_migrated(self):
+    def test_legacy_scalar_threshold_cache_is_invalidated(self):
         cache_dir = self.root / "cache"
         cache_dir.mkdir()
         self.frame().to_csv(cache_dir / "labels.csv", index=False)
@@ -157,14 +161,22 @@ class PseudoLabelCacheTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        def must_not_generate():
-            self.fail("Schema v1 cache should be reused")
+        calls = []
 
-        result = self.cache.load_or_generate(self.spec(), must_not_generate)
+        def generate():
+            calls.append("called")
+            return self.frame()
 
-        self.assertTrue(result.reused)
+        result = self.cache.load_or_generate(self.spec(), generate)
+
+        self.assertFalse(result.reused)
+        self.assertEqual(calls, ["called"])
         migrated = json.loads(result.metadata_path.read_text(encoding="utf-8"))
-        self.assertEqual(migrated["contract"]["schema_version"], 2)
+        self.assertEqual(migrated["contract"]["schema_version"], 3)
+        self.assertEqual(
+            migrated["contract"]["grade_thresholds"],
+            [0.95, 0.95, 0.95, 0.95, 0.95],
+        )
         self.assertEqual(result.csv_path.name, "labels.csv")
         self.assertEqual(result.metadata_path.name, "meta.json")
 

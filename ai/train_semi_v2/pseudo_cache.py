@@ -17,7 +17,7 @@ from typing import Callable, Iterable
 import pandas as pd
 
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 PSEUDO_COLUMNS = ("image_path", "pseudo_label", "confidence")
 
 
@@ -56,7 +56,7 @@ def _manifest_digest(paths: Iterable[Path]) -> tuple[str, int]:
 class PseudoLabelCacheSpec:
     """Everything that can change teacher predictions or accepted labels."""
 
-    threshold: float
+    grade_thresholds: tuple[float, ...]
     teacher_checkpoint: Path
     unlabeled_paths: tuple[Path, ...]
     preprocessing: str
@@ -68,7 +68,7 @@ class PseudoLabelCacheSpec:
         manifest_sha256, image_count = _manifest_digest(self.unlabeled_paths)
         return {
             "schema_version": CACHE_SCHEMA_VERSION,
-            "threshold": float(self.threshold),
+            "grade_thresholds": [float(value) for value in self.grade_thresholds],
             "teacher_checkpoint": _stable_file_identity(self.teacher_checkpoint),
             "unlabeled_manifest_sha256": manifest_sha256,
             "unlabeled_image_count": image_count,

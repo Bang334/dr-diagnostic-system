@@ -26,6 +26,7 @@ from ai.train_semi_v2.train import (
     limit_labeled_replay,
     limit_unlabeled_paths,
     parse_args as parse_semi_args,
+    parse_grade_thresholds,
     prepare_output_dir,
     resume_training_state,
     train_one_epoch,
@@ -49,6 +50,7 @@ class ArgumentDefaultTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.threshold, 0.95)
+        self.assertIsNone(args.grade_thresholds)
         self.assertEqual(args.pseudo_weight, 0.25)
         self.assertEqual(args.batch_size, 4)
         self.assertEqual(args.accum_steps, 4)
@@ -61,6 +63,33 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.max_pseudo_grade_zero, 500)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
+
+    def test_resolves_threshold_for_each_grade(self):
+        args = parse_semi_args(
+            [
+                "--checkpoint",
+                "best.pth",
+                "--dataset-dir",
+                "dataset",
+                "--unlabeled-dir",
+                "unlabeled",
+                "--output-dir",
+                "output",
+                "--grade-thresholds",
+                "0.99,0.90,0.95,0.90,0.93",
+            ]
+        )
+        validate_semi_args(args)
+        self.assertEqual(
+            args.grade_thresholds,
+            (0.99, 0.90, 0.95, 0.90, 0.93),
+        )
+
+    def test_rejects_invalid_grade_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "Expected five"):
+            parse_grade_thresholds("0.9,0.9", fallback=0.95)
+        with self.assertRaisesRegex(ValueError, "between 0.5 and 1.0"):
+            parse_grade_thresholds("0.9,0.9,0.4,0.9,0.9", fallback=0.95)
 
 
 class _WeightedBatchDataset(Dataset):
@@ -490,6 +519,30 @@ class _ConfidenceModel(nn.Module):
 
 
 class PseudoLabelTests(unittest.TestCase):
+    def test_applies_threshold_for_the_predicted_grade(self):
+        class PerGradeConfidenceModel(nn.Module):
+            def forward(self, images):
+                logits = torch.zeros(images.size(0), 5, device=images.device)
+                first = images[:, 0, 0, 0] > 0.5
+                logits[first, 0] = 2.2
+                logits[~first, 1] = 2.2
+                return logits
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                frame = generate_pseudo_labels(
+                    PerGradeConfidenceModel(),
+                    loader,
+                    torch.device("cpu"),
+                    grade_thresholds=(0.80, 0.60, 0.95, 0.95, 0.95),
+                    max_per_class=0,
+                    amp_enabled=False,
+                )
+
+        self.assertEqual(len(frame), 1)
+        self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 1)
+
     def test_keeps_only_predictions_above_threshold(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
@@ -499,7 +552,7 @@ class PseudoLabelTests(unittest.TestCase):
                     _ConfidenceModel(),
                     loader,
                     torch.device("cpu"),
-                    threshold=0.95,
+                    grade_thresholds=(0.95, 0.95, 0.95, 0.95, 0.95),
                     max_per_class=0,
                     amp_enabled=False,
                 )
@@ -536,7 +589,7 @@ class PseudoLabelTests(unittest.TestCase):
                     model,
                     loader,
                     torch.device("cpu"),
-                    threshold=0.95,
+                    grade_thresholds=(0.95, 0.95, 0.95, 0.95, 0.95),
                     max_per_class=0,
                     amp_enabled=False,
                     progress_path=progress_path,

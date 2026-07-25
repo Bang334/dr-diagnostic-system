@@ -1,5 +1,23 @@
 # Train Semi V2
 
+## Ngưỡng riêng cho từng grade
+
+Pipeline pseudo-label tĩnh hỗ trợ một confidence threshold riêng cho mỗi grade:
+
+```powershell
+python -m ai.train_semi_v2.train `
+  --checkpoint D:\runs\grade\checkpoint-best.pth `
+  --dataset-dir D:\data\fundus_merged `
+  --unlabeled-dir D:\data\fundus_unlabeled `
+  --output-dir D:\runs\semi-class-thresholds `
+  --grade-thresholds 0.99,0.90,0.95,0.90,0.93
+```
+
+Thứ tự luôn là grade `0,1,2,3,4`. Nếu bỏ `--grade-thresholds`, cả năm grade
+tiếp tục dùng `--threshold` (mặc định `0.95`) để tương thích với lệnh cũ.
+Danh sách ngưỡng là một phần của cache fingerprint, vì vậy thay một ngưỡng sẽ
+tạo lại pseudo-label. Không đổi ngưỡng khi resume; hãy dùng output/run mới.
+
 Pipeline semi-supervised v2 nối trực tiếp với checkpoint do
 `ai/grading/train.py` tạo. Model, preprocessing, image size, loss và grading
 contract được dựng lại từ metadata của checkpoint grade; không khai báo lại

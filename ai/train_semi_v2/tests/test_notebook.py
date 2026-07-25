@@ -60,7 +60,14 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
     def test_caps_only_grade_zero_after_reusing_predictions(self):
         self.assertIn("'max_pseudo_grade_zero': 500", self.source)
         self.assertIn("--max-pseudo-grade-zero", self.source)
-        self.assertIn("RUN_NAME = 'run'", self.source)
+        self.assertIn("RUN_NAME = 'run-class-thresholds'", self.source)
+
+    def test_sets_one_pseudo_label_threshold_per_grade(self):
+        self.assertIn(
+            "'grade_thresholds': [0.99, 0.90, 0.95, 0.90, 0.93]",
+            self.source,
+        )
+        self.assertIn("--grade-thresholds", self.source)
 
     def test_uses_batch_four_and_preserves_effective_batch_size(self):
         self.assertIn("'batch_size': 4", self.source)

@@ -16,7 +16,7 @@ from pathlib import Path
 import random
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 import torch
@@ -255,6 +255,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--min-lr", type=float, default=1e-7)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--threshold", type=float, default=0.95)
+    parser.add_argument(
+        "--grade-thresholds",
+        type=str,
+        default=None,
+        help=(
+            "Five comma-separated confidence thresholds for predicted grades "
+            "0,1,2,3,4. When omitted, --threshold is used for every grade."
+        ),
+    )
     parser.add_argument("--pseudo-weight", type=float, default=0.25)
     parser.add_argument(
         "--max-unlabeled-images",
@@ -304,9 +313,34 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return args
 
 
+def parse_grade_thresholds(
+    raw: Optional[str | Sequence[float]],
+    *,
+    fallback: float,
+) -> tuple[float, ...]:
+    if raw is None:
+        values = [float(fallback)] * 5
+    elif isinstance(raw, str):
+        values = [float(value.strip()) for value in raw.split(",") if value.strip()]
+    else:
+        values = [float(value) for value in raw]
+    if len(values) != 5:
+        raise ValueError(
+            "Expected five comma-separated thresholds for grades 0,1,2,3,4; "
+            f"received {values}"
+        )
+    if any(value < 0.5 or value > 1.0 for value in values):
+        raise ValueError("Every grade threshold must be between 0.5 and 1.0")
+    return tuple(values)
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if not 0.5 <= args.threshold <= 1.0:
         raise ValueError("--threshold must be between 0.5 and 1.0")
+    args.grade_thresholds = parse_grade_thresholds(
+        args.grade_thresholds,
+        fallback=args.threshold,
+    )
     if not 0.0 < args.pseudo_weight <= 1.0:
         raise ValueError("--pseudo-weight must be in (0, 1]")
     if args.epochs < 1 or args.patience < 1:
@@ -352,12 +386,16 @@ def generate_pseudo_labels(
     loader: DataLoader,
     device: torch.device,
     *,
-    threshold: float,
+    grade_thresholds: Sequence[float],
     max_per_class: int,
     amp_enabled: bool,
     progress_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     model.eval()
+    thresholds = parse_grade_thresholds(
+        grade_thresholds,
+        fallback=float(grade_thresholds[0]),
+    )
     progress_columns = ["image_path", "pseudo_label", "confidence", "accepted"]
     progress_records: List[Dict[str, Any]] = []
     if progress_path is not None and progress_path.is_file():
@@ -402,11 +440,12 @@ def generate_pseudo_labels(
             for path, label, score in zip(
                 pending_paths, labels.cpu(), confidence.cpu()
             ):
-                accepted = float(score) >= threshold
+                predicted_grade = int(label)
+                accepted = float(score) >= thresholds[predicted_grade]
                 batch_records.append(
                     {
                         "image_path": path,
-                        "pseudo_label": int(label),
+                        "pseudo_label": predicted_grade,
                         "confidence": float(score),
                         "accepted": accepted,
                     }
@@ -649,6 +688,16 @@ def run(args: argparse.Namespace) -> None:
         saved_run_args = resume_state.get("args", {}).get(
             "semi_supervised_args", {}
         )
+        saved_grade_thresholds = parse_grade_thresholds(
+            saved_run_args.get("grade_thresholds"),
+            fallback=float(saved_run_args.get("threshold", args.threshold)),
+        )
+        if tuple(args.grade_thresholds) != saved_grade_thresholds:
+            raise ValueError(
+                "Cannot change grade thresholds while resuming because pseudo.csv "
+                f"was created with {list(saved_grade_thresholds)}, but the current "
+                f"command uses {list(args.grade_thresholds)}. Start a new RUN_NAME."
+            )
         if replay_manifest_path.is_file():
             replay_frame = pd.read_csv(replay_manifest_path)
         else:
@@ -768,7 +817,8 @@ def run(args: argparse.Namespace) -> None:
     if resume_state is None:
         pseudo_started_at = time.perf_counter()
         log(
-            f"[5/7] Generating pseudo-labels: threshold={args.threshold}, "
+            f"[5/7] Generating pseudo-labels: "
+            f"grade_thresholds={list(args.grade_thresholds)}, "
             f"max_per_class={args.max_pseudo_per_class}, "
             f"images={selected_unlabeled_count:,}."
         )
@@ -783,7 +833,7 @@ def run(args: argparse.Namespace) -> None:
                 model,
                 unlabeled_loader,
                 device,
-                threshold=args.threshold,
+                grade_thresholds=args.grade_thresholds,
                 max_per_class=args.max_pseudo_per_class,
                 amp_enabled=amp_enabled,
                 progress_path=cache.progress_path if cache is not None else None,
@@ -793,7 +843,7 @@ def run(args: argparse.Namespace) -> None:
             preprocessing = str(getattr(saved_args, "preprocessing", "rgb_crop"))
             cache_result = cache.load_or_generate(
                 PseudoLabelCacheSpec(
-                    threshold=args.threshold,
+                    grade_thresholds=tuple(args.grade_thresholds),
                     teacher_checkpoint=args.checkpoint,
                     unlabeled_paths=tuple(unlabeled_paths),
                     preprocessing=preprocessing,
@@ -811,7 +861,7 @@ def run(args: argparse.Namespace) -> None:
                         "reused": cache_result.reused,
                         "csv_path": os.fspath(cache_result.csv_path),
                         "metadata_path": os.fspath(cache_result.metadata_path),
-                        "threshold": args.threshold,
+                        "grade_thresholds": list(args.grade_thresholds),
                     },
                     indent=2,
                     ensure_ascii=False,
@@ -840,8 +890,9 @@ def run(args: argparse.Namespace) -> None:
             )
         if pseudo_frame.empty:
             raise RuntimeError(
-                "No pseudo-label passed the confidence threshold; lower --threshold "
-                "only after inspecting model calibration and the unlabeled domain"
+                "No pseudo-label passed the confidence thresholds; lower the "
+                "relevant grade threshold only after inspecting "
+                "model calibration and the unlabeled domain"
             )
         pseudo_frame.to_csv(pseudo_path, index=False)
         log(
@@ -910,11 +961,17 @@ def run(args: argparse.Namespace) -> None:
         metadata = {
             "research_method": "pseudo_labeling",
             "parent_checkpoint": os.fspath(args.checkpoint.resolve()),
-            "pseudo_threshold": args.threshold,
+            "pseudo_thresholds": list(args.grade_thresholds),
             "pseudo_weight": args.pseudo_weight,
             "unlabeled_dir": os.fspath(args.unlabeled_dir.resolve()),
             "semi_supervised_args": {
-                key: os.fspath(value) if isinstance(value, Path) else value
+                key: (
+                    os.fspath(value)
+                    if isinstance(value, Path)
+                    else list(value)
+                    if isinstance(value, tuple)
+                    else value
+                )
                 for key, value in vars(args).items()
             },
         }
