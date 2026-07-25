@@ -35,6 +35,7 @@ from ai.grading.train import (
     save_evaluation_artifacts,
 )
 from ai.train_semi_v2.runtime import (
+    FixMatchUnlabeledDataset,
     PseudoLabeledFundusDataset,
     UnlabeledFundusDataset,
     WeightedLabeledDataset,
@@ -48,6 +49,12 @@ from ai.train_semi_v2.runtime import (
     seed_everything,
 )
 from ai.train_semi_v2.pseudo_cache import PseudoLabelCache, PseudoLabelCacheSpec
+from ai.train_semi_v2.fixmatch import (
+    EMATeacher,
+    build_fixmatch_transforms,
+    parse_grade_thresholds,
+    train_fixmatch_epoch,
+)
 
 
 _LOG_PATH: Optional[Path] = None
@@ -257,6 +264,45 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.95)
     parser.add_argument("--pseudo-weight", type=float, default=0.25)
     parser.add_argument(
+        "--training-mode",
+        choices=("fixmatch", "static"),
+        default="fixmatch",
+        help="Use online FixMatch+EMA by default, or the legacy static pseudo-label loop",
+    )
+    parser.add_argument(
+        "--grade-thresholds",
+        type=str,
+        default=None,
+        help=(
+            "Five comma-separated confidence thresholds for grades 0..4. "
+            "When omitted, --threshold is used for every grade."
+        ),
+    )
+    parser.add_argument(
+        "--unlabeled-batch-size",
+        type=int,
+        default=4,
+        help="Unlabeled weak/strong pairs per FixMatch step",
+    )
+    parser.add_argument(
+        "--unsupervised-weight",
+        type=float,
+        default=0.5,
+        help="Maximum FixMatch consistency-loss multiplier",
+    )
+    parser.add_argument(
+        "--unsupervised-warmup-epochs",
+        type=int,
+        default=3,
+        help="Linearly ramp consistency loss from zero over this many epochs",
+    )
+    parser.add_argument(
+        "--ema-decay",
+        type=float,
+        default=0.999,
+        help="EMA teacher decay",
+    )
+    parser.add_argument(
         "--max-unlabeled-images",
         type=int,
         default=0,
@@ -309,6 +355,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--threshold must be between 0.5 and 1.0")
     if not 0.0 < args.pseudo_weight <= 1.0:
         raise ValueError("--pseudo-weight must be in (0, 1]")
+    args.grade_thresholds = parse_grade_thresholds(
+        args.grade_thresholds,
+        fallback=args.threshold,
+    )
+    if args.unlabeled_batch_size < 1:
+        raise ValueError("--unlabeled-batch-size must be positive")
+    if not 0.0 <= args.unsupervised_weight <= 2.0:
+        raise ValueError("--unsupervised-weight must be between 0 and 2")
+    if args.unsupervised_warmup_epochs < 0:
+        raise ValueError("--unsupervised-warmup-epochs cannot be negative")
+    if not 0.0 < args.ema_decay < 1.0:
+        raise ValueError("--ema-decay must be between 0 and 1")
     if args.epochs < 1 or args.patience < 1:
         raise ValueError("--epochs and --patience must be positive")
     if args.batch_size < 1 or args.accum_steps < 1:
@@ -590,6 +648,453 @@ def evaluate_held_out_test(
     return metrics
 
 
+def run_fixmatch(
+    args: argparse.Namespace,
+    model: nn.Module,
+    saved_args: argparse.Namespace,
+    resume_state: Optional[Dict[str, Any]],
+    frames: Dict[str, pd.DataFrame],
+    device: torch.device,
+    amp_enabled: bool,
+    *,
+    run_started_at: float,
+) -> None:
+    """Run online dual-loader FixMatch with an EMA teacher."""
+    image_size = int(getattr(saved_args, "image_size", 224))
+    train_transform, eval_transform = build_transforms(image_size)
+    weak_transform, strong_transform = build_fixmatch_transforms(image_size)
+    data_args = _dataset_args(saved_args, args)
+
+    replay_manifest_path = args.output_dir / "replay.csv"
+    unlabeled_manifest_path = args.output_dir / "scan.csv"
+    baseline_path = args.output_dir / "baseline.json"
+    history_path = args.output_dir / "history.jsonl"
+
+    saved_run_args: Dict[str, Any] = {}
+    if resume_state is not None:
+        saved_run_args = dict(
+            resume_state.get("args", {}).get("semi_supervised_args", {})
+        )
+        saved_mode = saved_run_args.get("training_mode", "static")
+        if saved_mode != "fixmatch":
+            raise ValueError(
+                "Cannot resume a legacy static pseudo-label checkpoint in FixMatch "
+                "mode; pass --training-mode static or start a new output directory"
+            )
+        current_resume_contract = {
+            "grade_thresholds": list(args.grade_thresholds),
+            "batch_size": args.batch_size,
+            "unlabeled_batch_size": args.unlabeled_batch_size,
+            "accum_steps": args.accum_steps,
+            "head_lr": args.head_lr,
+            "backbone_lr": args.backbone_lr,
+            "min_lr": args.min_lr,
+            "weight_decay": args.weight_decay,
+            "unsupervised_weight": args.unsupervised_weight,
+            "unsupervised_warmup_epochs": args.unsupervised_warmup_epochs,
+            "ema_decay": args.ema_decay,
+            "seed": args.seed,
+        }
+        mismatches = {
+            key: (saved_run_args[key], current_value)
+            for key, current_value in current_resume_contract.items()
+            if key in saved_run_args
+            and saved_run_args[key] != current_value
+        }
+        if mismatches:
+            raise ValueError(
+                "FixMatch resume arguments differ from checkpoint: "
+                f"{mismatches}. Resume with the original values or start a new run."
+            )
+
+    if replay_manifest_path.is_file():
+        replay_frame = pd.read_csv(replay_manifest_path)
+    else:
+        replay_frame = limit_labeled_replay(
+            frames["train"],
+            max_per_class=int(
+                saved_run_args.get(
+                    "max_labeled_per_class", args.max_labeled_per_class
+                )
+            ),
+            seed=int(saved_run_args.get("seed", args.seed)),
+        )
+        replay_frame.to_csv(replay_manifest_path, index=False)
+
+    if unlabeled_manifest_path.is_file():
+        unlabeled_manifest = pd.read_csv(unlabeled_manifest_path)
+        unlabeled_paths = [
+            Path(path).expanduser().resolve()
+            for path in unlabeled_manifest["image_path"]
+        ]
+        discovered_unlabeled_count = int(
+            saved_run_args.get("unlabeled_images_discovered", len(unlabeled_paths))
+        )
+    else:
+        discovered_paths = discover_images(args.unlabeled_dir)
+        discovered_unlabeled_count = len(discovered_paths)
+        unlabeled_paths = limit_unlabeled_paths(
+            discovered_paths,
+            max_images=int(
+                saved_run_args.get(
+                    "max_unlabeled_images", args.max_unlabeled_images
+                )
+            ),
+            seed=int(saved_run_args.get("seed", args.seed)),
+        )
+        assert_unlabeled_is_external(unlabeled_paths, frames)
+        pd.DataFrame(
+            {"image_path": [os.fspath(path) for path in unlabeled_paths]}
+        ).to_csv(unlabeled_manifest_path, index=False)
+
+    assert_unlabeled_is_external(unlabeled_paths, frames)
+    train_dataset = FundusDataset(replay_frame, data_args, train_transform)
+    val_dataset = FundusDataset(frames["val"], data_args, eval_transform)
+    unlabeled_dataset = FixMatchUnlabeledDataset(
+        unlabeled_paths,
+        image_size,
+        weak_transform,
+        strong_transform,
+        enhance=args.enhance,
+    )
+    labeled_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+    unlabeled_loader = DataLoader(
+        unlabeled_dataset,
+        batch_size=args.unlabeled_batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+    log(
+        "FixMatch data prepared: "
+        f"labeled={len(train_dataset):,} "
+        f"{replay_frame['diagnosis'].value_counts().sort_index().to_dict()}, "
+        f"unlabeled={len(unlabeled_dataset):,}, validation={len(val_dataset):,}, "
+        f"labeled_batch={args.batch_size}, "
+        f"unlabeled_batch={args.unlabeled_batch_size}, "
+        f"steps_per_epoch={len(labeled_loader):,}."
+    )
+    log(
+        "FixMatch policy: "
+        f"grade_thresholds={list(args.grade_thresholds)}, "
+        f"lambda_u_max={args.unsupervised_weight}, "
+        f"warmup_epochs={args.unsupervised_warmup_epochs}, "
+        f"ema_decay={args.ema_decay}."
+    )
+
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    teacher = EMATeacher(model, decay=args.ema_decay)
+    if resume_state is not None:
+        ema_state = resume_state.get("ema_teacher")
+        if ema_state is None:
+            raise ValueError(
+                "FixMatch resume checkpoint is missing the EMA teacher state"
+            )
+        teacher.load_state_dict(ema_state)
+
+    if resume_state is None:
+        baseline_started_at = time.perf_counter()
+        log(
+            f"[5/7] Evaluating parent checkpoint on "
+            f"{len(val_loader):,} validation batches..."
+        )
+        baseline_loss, targets, predictions, _ = evaluate(
+            teacher.model,
+            val_loader,
+            criterion,
+            device,
+            "ce",
+            amp_enabled,
+        )
+        baseline_metrics = calculate_metrics(targets, predictions)
+        baseline_payload = {
+            "loss": baseline_loss,
+            **baseline_metrics,
+            "labeled_train_images_discovered": len(frames["train"]),
+            "labeled_replay_images": len(train_dataset),
+            "unlabeled_images_discovered": discovered_unlabeled_count,
+            "unlabeled_images_scanned": len(unlabeled_dataset),
+        }
+        baseline_path.write_text(
+            json.dumps(baseline_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        best_qwk = float(baseline_metrics["qwk"])
+        if not math.isfinite(best_qwk):
+            raise RuntimeError("Parent checkpoint produced a non-finite validation QWK")
+        log(
+            f"Parent validation completed in "
+            f"{format_duration(time.perf_counter() - baseline_started_at)}: "
+            f"loss={baseline_loss:.6f}, qwk={best_qwk:.6f}."
+        )
+        metadata = {
+            "research_method": "fixmatch_ema",
+            "parent_checkpoint": os.fspath(args.checkpoint.resolve()),
+            "grade_thresholds": list(args.grade_thresholds),
+            "unlabeled_dir": os.fspath(args.unlabeled_dir.resolve()),
+            "semi_supervised_args": {
+                key: (
+                    os.fspath(value)
+                    if isinstance(value, Path)
+                    else list(value)
+                    if isinstance(value, tuple)
+                    else value
+                )
+                for key, value in vars(args).items()
+            },
+        }
+        metadata["semi_supervised_args"][
+            "unlabeled_images_discovered"
+        ] = discovered_unlabeled_count
+        checkpoint_args = checkpoint_args_with_metadata(saved_args, metadata)
+        save_classifier_checkpoint(
+            args.output_dir / "best.pth",
+            teacher.model,
+            checkpoint_args,
+            epoch=-1,
+            best_qwk=best_qwk,
+            best_epoch=-1,
+            stale_epochs=0,
+            parent_checkpoint=args.checkpoint,
+        )
+        parent_checkpoint = args.checkpoint
+    else:
+        if not baseline_path.is_file():
+            raise FileNotFoundError(
+                f"FixMatch resume requires baseline metrics: {baseline_path}"
+            )
+        baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+        baseline_loss = float(baseline_payload["loss"])
+        baseline_metrics = {
+            key: value
+            for key, value in baseline_payload.items()
+            if key
+            in {
+                "accuracy",
+                "macro_f1",
+                "balanced_accuracy",
+                "qwk",
+                "per_class_recall",
+            }
+        }
+        checkpoint_args = dict(resume_state["args"])
+        parent_checkpoint = Path(
+            resume_state.get("parent_checkpoint", args.checkpoint)
+        )
+        log(
+            f"[5/7] Resume keeps parent baseline: loss={baseline_loss:.6f}, "
+            f"qwk={float(baseline_metrics['qwk']):.6f}."
+        )
+
+    optimizer = build_optimizer(model, args)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(args.epochs - 1, 1),
+        eta_min=args.min_lr,
+    )
+    scaler = create_scaler(amp_enabled)
+    start_epoch, best_epoch, stale_epochs = 0, -1, 0
+    if resume_state is not None:
+        start_epoch, best_qwk, best_epoch, stale_epochs = resume_training_state(
+            resume_state,
+            optimizer,
+            scheduler,
+            scaler,
+        )
+        trim_history_for_resume(history_path, start_epoch)
+        log(
+            f"Resume state restored: next_epoch={start_epoch + 1}/{args.epochs}, "
+            f"best_epoch={best_epoch + 1}, best_qwk={best_qwk:.6f}, "
+            f"patience={stale_epochs}/{args.patience}."
+        )
+        if stale_epochs >= args.patience:
+            log("Run had already reached early stopping; no additional epoch is needed.")
+            start_epoch = args.epochs
+    else:
+        best_qwk = float(baseline_metrics["qwk"])
+
+    aggregate_accepted = {grade: 0 for grade in range(5)}
+    aggregate_seen = 0
+    last_stats = None
+    if start_epoch >= args.epochs:
+        log(f"[6/7] No remaining epoch: checkpoint already reached {start_epoch} epochs.")
+    else:
+        log(
+            f"[6/7] FixMatch training epochs {start_epoch + 1}..{args.epochs}; "
+            f"patience={args.patience}, accum_steps={args.accum_steps}."
+        )
+
+    for epoch in range(start_epoch, args.epochs):
+        epoch_number = epoch + 1
+        epoch_started_at = time.perf_counter()
+        log(f"--- FixMatch epoch {epoch_number}/{args.epochs} started ---")
+        stats = train_fixmatch_epoch(
+            model,
+            teacher,
+            labeled_loader,
+            unlabeled_loader,
+            optimizer,
+            scaler,
+            device,
+            grade_thresholds=args.grade_thresholds,
+            max_unsupervised_weight=args.unsupervised_weight,
+            unsupervised_warmup_epochs=args.unsupervised_warmup_epochs,
+            epoch_index=epoch,
+            accum_steps=args.accum_steps,
+            amp_enabled=amp_enabled,
+            log_every=max(1, math.ceil(len(labeled_loader) / 20)),
+            log_fn=log,
+        )
+        last_stats = stats
+        aggregate_seen += stats.seen_unlabeled
+        for grade, count in stats.accepted_per_grade.items():
+            aggregate_accepted[grade] += count
+        log(
+            f"Epoch {epoch_number} train complete: loss={stats.total_loss:.6f}, "
+            f"sup={stats.supervised_loss:.6f}, "
+            f"unsup={stats.unsupervised_loss:.6f}, "
+            f"accepted={stats.accepted}/{stats.seen_unlabeled} "
+            f"({100.0 * stats.acceptance_rate:.1f}%), "
+            f"accepted_per_grade={stats.accepted_per_grade}, "
+            f"elapsed={format_duration(time.perf_counter() - epoch_started_at)}."
+        )
+
+        validation_started_at = time.perf_counter()
+        val_loss, targets, predictions, _ = evaluate(
+            teacher.model,
+            val_loader,
+            criterion,
+            device,
+            "ce",
+            amp_enabled,
+        )
+        metrics = calculate_metrics(targets, predictions)
+        record = {
+            "epoch": epoch,
+            "train_loss": stats.total_loss,
+            "supervised_loss": stats.supervised_loss,
+            "unsupervised_loss": stats.unsupervised_loss,
+            "unsupervised_weight": stats.final_unsupervised_weight,
+            "pseudo_acceptance_rate": stats.acceptance_rate,
+            "accepted_pseudo_labels": stats.accepted,
+            "accepted_pseudo_labels_per_grade": stats.accepted_per_grade,
+            "predicted_unlabeled_per_grade": stats.predicted_per_grade,
+            "mean_teacher_confidence": stats.mean_confidence,
+            "val_loss": val_loss,
+            "baseline_val_loss": baseline_loss,
+            **metrics,
+        }
+        log(
+            f"Epoch {epoch_number} EMA validation complete in "
+            f"{format_duration(time.perf_counter() - validation_started_at)}: "
+            f"{json.dumps(record, ensure_ascii=False)}"
+        )
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        current_qwk = float(metrics["qwk"])
+        if not math.isfinite(current_qwk):
+            raise RuntimeError("FixMatch EMA teacher produced non-finite validation QWK")
+        if current_qwk > best_qwk:
+            best_qwk = current_qwk
+            best_epoch = epoch
+            stale_epochs = 0
+            best_path = args.output_dir / "best.pth"
+            log(f"EMA QWK improved to {best_qwk:.6f}; saving {best_path}...")
+            save_classifier_checkpoint(
+                best_path,
+                teacher.model,
+                checkpoint_args,
+                epoch=epoch,
+                best_qwk=best_qwk,
+                best_epoch=best_epoch,
+                stale_epochs=stale_epochs,
+                parent_checkpoint=parent_checkpoint,
+            )
+        else:
+            stale_epochs += 1
+            log(
+                f"EMA QWK did not improve ({current_qwk:.6f} <= {best_qwk:.6f}); "
+                f"patience={stale_epochs}/{args.patience}."
+            )
+
+        scheduler.step()
+        last_path = args.output_dir / "last.pth"
+        checkpoint_size = save_classifier_checkpoint(
+            last_path,
+            model,
+            checkpoint_args,
+            epoch=epoch,
+            best_qwk=best_qwk,
+            best_epoch=best_epoch,
+            stale_epochs=stale_epochs,
+            parent_checkpoint=parent_checkpoint,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            extra_state={"ema_teacher": teacher.state_dict()},
+        )
+        checkpoint_size_message = (
+            f"{checkpoint_size / 1024**3:.2f} GiB"
+            if checkpoint_size is not None
+            else "size unavailable"
+        )
+        log(
+            f"FixMatch resumable checkpoint saved: {last_path} "
+            f"({checkpoint_size_message})."
+        )
+        if stale_epochs >= args.patience:
+            log(f"Early stopping after {stale_epochs} epochs without QWK improvement.")
+            break
+
+    summary = {
+        "research_method": "fixmatch_ema",
+        "parent_qwk": float(baseline_metrics["qwk"]),
+        "best_qwk": best_qwk,
+        "best_epoch": best_epoch,
+        "grade_thresholds": list(args.grade_thresholds),
+        "ema_decay": args.ema_decay,
+        "unsupervised_weight": args.unsupervised_weight,
+        "unsupervised_warmup_epochs": args.unsupervised_warmup_epochs,
+        "labeled_train_images_discovered": len(frames["train"]),
+        "labeled_replay_images": len(train_dataset),
+        "unlabeled_images_discovered": discovered_unlabeled_count,
+        "unlabeled_images_scanned": len(unlabeled_dataset),
+        "online_unlabeled_views_seen": aggregate_seen,
+        "online_pseudo_labels_accepted_per_grade": {
+            str(grade): count for grade, count in aggregate_accepted.items()
+        },
+        "last_epoch_pseudo_acceptance_rate": (
+            last_stats.acceptance_rate if last_stats is not None else None
+        ),
+        "test_split_used_for_training": False,
+        "test_split_used_for_model_selection": False,
+        "test_split_evaluated_after_training": False,
+    }
+    with (args.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
+    log(
+        f"[7/7] FixMatch run finished in "
+        f"{format_duration(time.perf_counter() - run_started_at)}."
+    )
+    log("Summary:\n" + json.dumps(summary, indent=2, ensure_ascii=False))
+
+
 def run(args: argparse.Namespace) -> None:
     run_started_at = time.perf_counter()
     validate_args(args)
@@ -629,6 +1134,18 @@ def run(args: argparse.Namespace) -> None:
     if args.eval_only:
         evaluate_held_out_test(
             args, model, saved_args, frames, device, amp_enabled
+        )
+        return
+    if args.training_mode == "fixmatch":
+        run_fixmatch(
+            args,
+            model,
+            saved_args,
+            resume_state,
+            frames,
+            device,
+            amp_enabled,
+            run_started_at=run_started_at,
         )
         return
 

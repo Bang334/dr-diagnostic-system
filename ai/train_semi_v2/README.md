@@ -1,5 +1,37 @@
 # Train Semi V2
 
+## FixMatch + EMA (mặc định trên nhánh này)
+
+Pipeline mặc định dùng hai DataLoader riêng:
+
+- labeled: học bằng cross-entropy;
+- unlabeled: EMA teacher dự đoán trên weak augmentation, student học cùng ảnh
+  qua strong augmentation;
+- pseudo-label được tạo online ở từng batch, không dùng nhãn tĩnh từ đầu run;
+- validation và checkpoint tốt nhất dùng EMA teacher;
+- `last.pth` lưu cả student, EMA teacher, optimizer, scheduler và scaler để resume.
+
+Mỗi grade 0..4 có một ngưỡng riêng:
+
+```powershell
+python -m ai.train_semi_v2.train `
+  --checkpoint D:\runs\grade\checkpoint-best.pth `
+  --dataset-dir D:\data\fundus_merged `
+  --unlabeled-dir D:\data\eyepacs-test `
+  --output-dir D:\runs\semi-fixmatch-01 `
+  --training-mode fixmatch `
+  --grade-thresholds 0.99,0.90,0.95,0.90,0.93 `
+  --unlabeled-batch-size 4 `
+  --unsupervised-weight 0.5 `
+  --unsupervised-warmup-epochs 3 `
+  --ema-decay 0.999
+```
+
+Thứ tự của `--grade-thresholds` luôn là `grade 0,1,2,3,4`. Nếu không truyền
+tham số này, cả năm grade dùng giá trị `--threshold` (mặc định `0.95`).
+Để chạy lại thuật toán pseudo-label tĩnh cũ, truyền `--training-mode static`.
+Chỉ resume FixMatch từ `last.pth`; `best.pth` được dành cho đánh giá/inference.
+
 Pipeline semi-supervised v2 nối trực tiếp với checkpoint do
 `ai/grading/train.py` tạo. Model, preprocessing, image size, loss và grading
 contract được dựng lại từ metadata của checkpoint grade; không khai báo lại

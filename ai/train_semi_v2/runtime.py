@@ -335,7 +335,7 @@ class UnlabeledFundusDataset(Dataset):
     def __len__(self) -> int:
         return len(self.image_paths)
 
-    def _load_image(self, path: Path) -> torch.Tensor:
+    def _load_pil(self, path: Path) -> Image.Image:
         image_bgr = cv2.imread(os.fspath(path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             raise FileNotFoundError(f"Could not read image: {path}")
@@ -345,11 +345,42 @@ class UnlabeledFundusDataset(Dataset):
             enhance=self.enhance,
         )
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        return self.transform(Image.fromarray(image_rgb))
+        return Image.fromarray(image_rgb)
+
+    def _load_image(self, path: Path) -> torch.Tensor:
+        return self.transform(self._load_pil(path))
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, str]:
         path = self.image_paths[index]
         return self._load_image(path), os.fspath(path)
+
+
+class FixMatchUnlabeledDataset(UnlabeledFundusDataset):
+    """Return weak and strong views from the same preprocessed fundus image."""
+
+    def __init__(
+        self,
+        image_paths: Sequence[Path],
+        image_size: int,
+        weak_transform: Any,
+        strong_transform: Any,
+        *,
+        enhance: bool = False,
+    ) -> None:
+        super().__init__(
+            image_paths,
+            image_size,
+            weak_transform,
+            enhance=enhance,
+        )
+        self.strong_transform = strong_transform
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
+        path = self.image_paths[index]
+        image = self._load_pil(path)
+        weak = self.transform(image.copy())
+        strong = self.strong_transform(image.copy())
+        return weak, strong, os.fspath(path)
 
 
 class PseudoLabeledFundusDataset(UnlabeledFundusDataset):
@@ -416,6 +447,7 @@ def save_classifier_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
     scaler: Optional[Any] = None,
+    extra_state: Optional[Mapping[str, Any]] = None,
 ) -> Optional[int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     state: Dict[str, Any] = {
@@ -431,6 +463,8 @@ def save_classifier_checkpoint(
         state["scheduler"] = scheduler.state_dict()
     if scaler is not None:
         state["scaler"] = scaler.state_dict()
+    if extra_state is not None:
+        state.update(dict(extra_state))
     if best_epoch is not None:
         state["best_epoch"] = int(best_epoch)
     if stale_epochs is not None:

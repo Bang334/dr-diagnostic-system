@@ -20,6 +20,11 @@ from ai.train_semi_v2.runtime import (
     prepare_fresh_output_dir,
     save_classifier_checkpoint,
 )
+from ai.train_semi_v2.fixmatch import (
+    EMATeacher,
+    parse_grade_thresholds,
+    train_fixmatch_epoch,
+)
 from ai.train_semi_v2.train import (
     cap_pseudo_grade_zero,
     generate_pseudo_labels,
@@ -49,6 +54,12 @@ class ArgumentDefaultTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.threshold, 0.95)
+        self.assertEqual(args.training_mode, "fixmatch")
+        self.assertIsNone(args.grade_thresholds)
+        self.assertEqual(args.unlabeled_batch_size, 4)
+        self.assertEqual(args.unsupervised_weight, 0.5)
+        self.assertEqual(args.unsupervised_warmup_epochs, 3)
+        self.assertEqual(args.ema_decay, 0.999)
         self.assertEqual(args.pseudo_weight, 0.25)
         self.assertEqual(args.batch_size, 4)
         self.assertEqual(args.accum_steps, 4)
@@ -61,6 +72,95 @@ class ArgumentDefaultTests(unittest.TestCase):
         self.assertEqual(args.max_pseudo_grade_zero, 500)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
+
+    def test_resolves_one_threshold_for_each_grade(self):
+        args = parse_semi_args(
+            [
+                "--checkpoint",
+                "best.pth",
+                "--dataset-dir",
+                "dataset",
+                "--unlabeled-dir",
+                "unlabeled",
+                "--output-dir",
+                "output",
+                "--grade-thresholds",
+                "0.99,0.90,0.95,0.90,0.93",
+            ]
+        )
+        validate_semi_args(args)
+        self.assertEqual(
+            args.grade_thresholds,
+            (0.99, 0.90, 0.95, 0.90, 0.93),
+        )
+
+
+class FixMatchTests(unittest.TestCase):
+    def test_rejects_invalid_per_grade_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "Expected 5"):
+            parse_grade_thresholds("0.9,0.9", fallback=0.95)
+        with self.assertRaisesRegex(ValueError, "between 0.5 and 1.0"):
+            parse_grade_thresholds("0.9,0.9,0.4,0.9,0.9", fallback=0.95)
+
+    def test_ema_teacher_updates_floating_parameters(self):
+        student = nn.Linear(1, 1, bias=False)
+        student.weight.data.fill_(2.0)
+        teacher = EMATeacher(student, decay=0.5)
+        student.weight.data.fill_(4.0)
+        teacher.update(student)
+        self.assertAlmostEqual(float(teacher.model.weight.item()), 3.0)
+
+    def test_applies_threshold_of_predicted_grade(self):
+        class TwoViewDataset(Dataset):
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                image = torch.tensor([float(index), 1.0])
+                return image, image, str(index)
+
+        class LabeledDataset(Dataset):
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                return torch.tensor([0.0, 1.0]), torch.tensor(0), str(index)
+
+        class ToyModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scale = nn.Parameter(torch.tensor(1.0))
+
+            def forward(self, images):
+                logits = torch.zeros(images.size(0), 5, device=images.device)
+                first = images[:, 0] < 0.5
+                logits[first, 0] = 2.20
+                logits[~first, 1] = 2.20
+                return logits * self.scale
+
+        student = ToyModel()
+        teacher = EMATeacher(student, decay=0.9)
+        optimizer = torch.optim.SGD(student.parameters(), lr=0.0)
+        stats = train_fixmatch_epoch(
+            student,
+            teacher,
+            DataLoader(LabeledDataset(), batch_size=2),
+            DataLoader(TwoViewDataset(), batch_size=2),
+            optimizer,
+            _NoOpScaler(),
+            torch.device("cpu"),
+            grade_thresholds=(0.8, 0.6, 0.95, 0.95, 0.95),
+            max_unsupervised_weight=0.5,
+            unsupervised_warmup_epochs=0,
+            epoch_index=0,
+            accum_steps=1,
+            amp_enabled=False,
+        )
+        self.assertEqual(stats.predicted_per_grade[0], 1)
+        self.assertEqual(stats.predicted_per_grade[1], 1)
+        self.assertEqual(stats.accepted_per_grade[0], 0)
+        self.assertEqual(stats.accepted_per_grade[1], 1)
+        self.assertEqual(stats.accepted, 1)
 
 
 class _WeightedBatchDataset(Dataset):
@@ -405,6 +505,7 @@ class ResumeTests(unittest.TestCase):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 scaler=_Scaler(),
+                extra_state={"ema_teacher": model.state_dict()},
             )
             state = torch.load(path, map_location="cpu", weights_only=False)
             self.assertEqual(checkpoint_size, path.stat().st_size)
@@ -414,6 +515,7 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(state["scaler"], {"scale": 128.0})
         self.assertIn("optimizer", state)
         self.assertIn("scheduler", state)
+        self.assertIn("ema_teacher", state)
 
 
 class DeepDRiDPreparationTests(unittest.TestCase):

@@ -23,21 +23,23 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("last.pth", self.source)
         self.assertIn("best.pth", self.source)
 
-    def test_uses_shared_cache_and_explains_invalidation(self):
-        self.assertIn("--pseudo-cache-dir", self.source)
-        self.assertIn("PSEUDO_CACHE_DIR", self.source)
-        self.assertIn("Đổi threshold", self.source)
-        self.assertIn("không xóa", self.source)
+    def test_uses_online_fixmatch_and_explains_resume_contract(self):
+        self.assertIn("'training_mode': 'fixmatch'", self.source)
+        self.assertIn("--grade-thresholds", self.source)
+        self.assertIn("EMA teacher", self.source)
+        self.assertIn("history.jsonl", self.source)
 
     def test_downloads_the_two_kaggle_datasets_instead_of_assuming_drive_folders(self):
         self.assertIn(
             "sehastrajits/fundus-aptosddridirdeyepacsmessidor", self.source
         )
         self.assertIn(
-            "griffchristenson/unlabeled-retinal-image-dataset", self.source
+            "gzuidhof/diabetic-retinopathy-detection-resized", self.source
         )
         self.assertIn("kaggle_cli", self.source)
         self.assertIn("split_dataset", self.source)
+        self.assertIn("find_image_directory", self.source)
+        self.assertIn("test_images_512", self.source)
         self.assertNotIn(
             "Path('/content/drive/MyDrive/fundus_merged')", self.source
         )
@@ -49,7 +51,7 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("subprocess.Popen", self.source)
         self.assertIn("stderr=subprocess.STDOUT", self.source)
         self.assertIn("KeyboardInterrupt", self.source)
-        self.assertIn("progress.csv hoặc last.pth", self.source)
+        self.assertIn("last.pth", self.source)
 
     def test_fresh_run_log_does_not_make_output_directory_nonempty(self):
         self.assertIn("is_fresh_run = '--resume' not in command", self.source)
@@ -57,10 +59,14 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("LAST_CHECKPOINT.is_file()", self.source)
         self.assertNotIn("OUTPUT_DIR.mkdir(parents=True, exist_ok=True)", self.source)
 
-    def test_caps_only_grade_zero_after_reusing_predictions(self):
-        self.assertIn("'max_pseudo_grade_zero': 500", self.source)
-        self.assertIn("--max-pseudo-grade-zero", self.source)
-        self.assertIn("RUN_NAME = 'run'", self.source)
+    def test_sets_one_threshold_per_grade(self):
+        self.assertIn(
+            "'grade_thresholds': [0.99, 0.90, 0.95, 0.90, 0.93]",
+            self.source,
+        )
+        self.assertIn("--unlabeled-batch-size", self.source)
+        self.assertIn("--unsupervised-warmup-epochs", self.source)
+        self.assertIn("RUN_NAME = 'run-eyepacs2015-fixmatch'", self.source)
 
     def test_uses_batch_four_and_preserves_effective_batch_size(self):
         self.assertIn("'batch_size': 4", self.source)
@@ -77,9 +83,9 @@ class TrainSemiV2NotebookTests(unittest.TestCase):
         self.assertIn("rgb_crop", self.source)
         self.assertIn("ben_graham", self.source)
 
-    def test_checks_out_the_pseudo_weight_fix_branch(self):
+    def test_checks_out_the_fixmatch_branch(self):
         self.assertIn(
-            "GITHUB_BRANCH = 'fix/semi-pseudo-weight-batch4'",
+            "GITHUB_BRANCH = 'feat/semi-v3-fixmatch-ema'",
             self.source,
         )
 
