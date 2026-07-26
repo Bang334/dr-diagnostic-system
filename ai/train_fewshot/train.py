@@ -2,22 +2,22 @@
 
 The source grading checkpoint must not have been trained on the target domain.
 Exactly K labeled target images per DR grade are selected once from the target
-training split and saved as a manifest. Adaptation only sees that fixed support
-set. The target test split is read only in explicit ``--eval-only`` mode, never
-for training, early stopping, or checkpoint selection.
+training split and embedded in each checkpoint. Adaptation only sees that fixed
+support set. The target test split is read only in explicit ``--eval-only``
+mode, never for training, early stopping, or checkpoint selection.
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+import csv
 import json
 import math
 import os
 import random
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -41,22 +41,46 @@ from ai.train_fewshot.runtime import (
 )
 
 
-_LOG_PATH: Optional[Path] = None
-
-
-def configure_log_file(path: Optional[Path]) -> None:
-    global _LOG_PATH
-    _LOG_PATH = path
-    if path is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-
 def log(message: str) -> None:
-    line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
-    print(line, flush=True)
-    if _LOG_PATH is not None:
-        with _LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+    print(message, flush=True)
+
+
+METRIC_FIELDS = (
+    "stage",
+    "epoch",
+    "loss",
+    "best_loss",
+    "accuracy",
+    "macro_f1",
+    "balanced_accuracy",
+    "qwk",
+)
+
+
+def save_metrics(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    replace_stages: Collection[str] = (),
+) -> None:
+    """Keep epoch history and before/after scores in one small CSV file."""
+    existing: List[Dict[str, Any]] = []
+    if path.is_file():
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            existing = [
+                row
+                for row in csv.DictReader(handle)
+                if row.get("stage") not in replace_stages
+            ]
+    existing.extend(
+        {field: row.get(field, "") for field in METRIC_FIELDS}
+        for row in rows
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=METRIC_FIELDS)
+        writer.writeheader()
+        writer.writerows(existing)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -110,7 +134,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--resume",
         type=Path,
         default=None,
-        help="Resume from checkpoint-last.pth inside the same output directory",
+        help="Resume from last.pth inside the same output directory",
     )
     parser.add_argument(
         "--eval-only",
@@ -315,7 +339,7 @@ def run_episode(
     device: torch.device,
     *,
     amp_enabled: bool,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, List[int], List[int]]:
     support_indices, support_labels, query_indices, query_labels = episode
     support_images = load_episode_images(dataset, support_indices).to(device)
     query_images = load_episode_images(dataset, query_indices).to(device)
@@ -323,8 +347,14 @@ def run_episode(
     query_targets = torch.tensor(query_labels, device=device)
     with torch.amp.autocast("cuda", enabled=amp_enabled):
         logits, class_ids = model.episode_logits(support_images, support_targets, query_images)
-        loss = F.cross_entropy(logits, _local_targets(query_targets, class_ids))
-    return loss
+        local_targets = _local_targets(query_targets, class_ids)
+        loss = F.cross_entropy(logits, local_targets)
+    predictions = class_ids[logits.argmax(dim=1)]
+    return (
+        loss,
+        query_targets.detach().cpu().tolist(),
+        predictions.detach().cpu().tolist(),
+    )
 
 
 @torch.no_grad()
@@ -431,6 +461,7 @@ def save_adapted_checkpoint(
     class_ids: torch.Tensor,
     args: argparse.Namespace,
     saved_args: argparse.Namespace,
+    support_frame: pd.DataFrame,
     *,
     epoch: int,
     best_support_loss: float,
@@ -453,7 +484,7 @@ def save_adapted_checkpoint(
             for key, value in vars(args).items()
         },
         "parent_checkpoint": os.fspath(args.checkpoint.resolve()),
-        "support_manifest": "support_manifest.csv",
+        "support_rows": support_frame.to_dict(orient="records"),
         "requires_support_set": False,
         "target_test_used_for_selection": False,
         "epoch": epoch,
@@ -479,7 +510,7 @@ def run(args: argparse.Namespace) -> None:
     run_started = time.perf_counter()
     validate_args(args)
     args.output_dir = prepare_output_dir(args.output_dir, args.resume)
-    configure_log_file(args.output_dir / "training.log")
+    metrics_path = args.output_dir / "metrics.csv"
     seed_everything(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required for RETFound few-shot adaptation")
@@ -494,7 +525,6 @@ def run(args: argparse.Namespace) -> None:
     encoder, saved_args = bundle.model, bundle.saved_args
     _assert_target_path_differs_from_recorded_source(saved_args, args.target_dataset_dir)
     frames, _ = load_split_frames(args.target_dataset_dir)
-    support_path = args.output_dir / "support_manifest.csv"
     resume_state = (
         torch.load(args.resume, map_location=device, weights_only=False)
         if args.resume is not None
@@ -522,13 +552,18 @@ def run(args: argparse.Namespace) -> None:
             )
     if resume_state is None:
         support_frame = select_fixed_support(frames["train"], args.shots, args.seed)
-        support_frame.to_csv(support_path, index=False)
     else:
-        if not support_path.is_file():
-            raise FileNotFoundError(
-                f"Resume requires the original fixed support manifest: {support_path}"
-            )
-        support_frame = pd.read_csv(support_path)
+        support_rows = resume_state.get("support_rows")
+        if support_rows is not None:
+            support_frame = pd.DataFrame(support_rows)
+        else:
+            legacy_support_path = args.output_dir / "support_manifest.csv"
+            if not legacy_support_path.is_file():
+                raise FileNotFoundError(
+                    "Resume checkpoint does not embed its fixed support set and "
+                    f"the legacy manifest is missing: {legacy_support_path}"
+                )
+            support_frame = pd.read_csv(legacy_support_path)
         expected_shots = int(resume_state["few_shot_args"]["shots"])
         actual_counts = support_frame["diagnosis"].value_counts()
         if not all(int(actual_counts.get(grade, 0)) == expected_shots for grade in range(NUM_CLASSES)):
@@ -588,9 +623,30 @@ def run(args: argparse.Namespace) -> None:
             "target_test_used_for_training": False,
             "target_test_used_for_model_selection": False,
         }
-        (args.output_dir / "comparison.json").write_text(
-            json.dumps(comparison, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        score_rows = []
+        for stage, values in (
+            ("before", source_metrics),
+            ("after", adapted_metrics),
+            ("delta", comparison["delta"]),
+        ):
+            score_rows.append(
+                {
+                    "stage": stage,
+                    **{
+                        key: values[key]
+                        for key in (
+                            "accuracy",
+                            "macro_f1",
+                            "balanced_accuracy",
+                            "qwk",
+                        )
+                    },
+                }
+            )
+        save_metrics(
+            metrics_path,
+            score_rows,
+            replace_stages={"before", "after", "delta"},
         )
         log("Held-out target test evaluation:\n" + json.dumps(comparison, indent=2))
         return
@@ -614,7 +670,6 @@ def run(args: argparse.Namespace) -> None:
     optimizer = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
     scaler = create_scaler(amp_enabled)
     sampler = FixedSupportEpisodeSampler(support_frame, args.seed)
-    history_path = args.output_dir / "history.jsonl"
     start_epoch = 0
     best_support_loss = math.inf
     stale_epochs = 0
@@ -641,13 +696,15 @@ def run(args: argparse.Namespace) -> None:
         epoch_started = time.perf_counter()
         model.train()
         losses: List[float] = []
+        epoch_targets: List[int] = []
+        epoch_predictions: List[int] = []
         for _ in tqdm(
             range(args.train_episodes),
             desc=f"few-shot epoch {epoch + 1}/{args.epochs}",
             leave=True,
         ):
             optimizer.zero_grad(set_to_none=True)
-            loss = run_episode(
+            loss, targets, predictions = run_episode(
                 model,
                 train_support_dataset,
                 sampler.sample(args.queries),
@@ -660,7 +717,10 @@ def run(args: argparse.Namespace) -> None:
             scaler.step(optimizer)
             scaler.update()
             losses.append(float(loss.detach()))
+            epoch_targets.extend(targets)
+            epoch_predictions.extend(predictions)
         support_loss = sum(losses) / len(losses)
+        epoch_metrics = calculate_metrics(epoch_targets, epoch_predictions)
         improved = support_loss < best_support_loss
         if improved:
             best_support_loss = support_loss
@@ -668,21 +728,26 @@ def run(args: argparse.Namespace) -> None:
         else:
             stale_epochs += 1
         record = {
-            "epoch": epoch,
-            "support_episode_loss": support_loss,
-            "best_support_loss": best_support_loss,
-            "improved": improved,
-            "stale_epochs": stale_epochs,
-            "unique_labeled_target_images": len(support_frame),
-            "target_test_evaluated": False,
+            "stage": "epoch",
+            "epoch": epoch + 1,
+            "loss": support_loss,
+            "best_loss": best_support_loss,
+            **{
+                key: epoch_metrics[key]
+                for key in (
+                    "accuracy",
+                    "macro_f1",
+                    "balanced_accuracy",
+                    "qwk",
+                )
+            },
         }
         log(
             f"Epoch {epoch + 1}/{args.epochs} complete in "
             f"{time.perf_counter() - epoch_started:.1f}s: "
             + json.dumps(record, ensure_ascii=False)
         )
-        with history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        save_metrics(metrics_path, [record])
         prototypes, class_ids = compute_prototypes(
             model, eval_support_dataset, device
         )
@@ -695,22 +760,24 @@ def run(args: argparse.Namespace) -> None:
             "sampler_state": sampler.rng.getstate(),
         }
         save_adapted_checkpoint(
-            args.output_dir / "checkpoint-last.pth",
+            args.output_dir / "last.pth",
             model,
             prototypes,
             class_ids,
             args,
             saved_args,
+            support_frame,
             **checkpoint_kwargs,
         )
         if improved:
             save_adapted_checkpoint(
-                args.output_dir / "checkpoint-best.pth",
+                args.output_dir / "best.pth",
                 model,
                 prototypes,
                 class_ids,
                 args,
                 saved_args,
+                support_frame,
                 **checkpoint_kwargs,
             )
         if stale_epochs >= args.patience:
@@ -728,12 +795,10 @@ def run(args: argparse.Namespace) -> None:
         "target_test_evaluated_during_training": False,
         "requires_support_set_at_inference": False,
         "best_support_loss": best_support_loss,
-        "best_checkpoint": "checkpoint-best.pth",
-        "last_checkpoint": "checkpoint-last.pth",
+        "best_checkpoint": "best.pth",
+        "last_checkpoint": "last.pth",
         "selection_signal": "fixed-support episodic loss",
     }
-    with (args.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2, ensure_ascii=False)
     log(
         f"Few-shot training finished in {time.perf_counter() - run_started:.1f}s.\n"
         + json.dumps(summary, indent=2, ensure_ascii=False)
@@ -745,7 +810,7 @@ def main() -> None:
         run(parse_args())
     except KeyboardInterrupt:
         log(
-            "Training interrupted. checkpoint-last.pth from the most recent "
+            "Training interrupted. last.pth from the most recent "
             "completed epoch remains safe; rerun with --resume."
         )
         raise SystemExit(130)

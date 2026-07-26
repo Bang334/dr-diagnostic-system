@@ -1,13 +1,18 @@
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
 
 import pandas as pd
+import torch
+import torch.nn as nn
 
 from ai.train_fewshot.train import (
     FixedSupportEpisodeSampler,
     parse_args,
     prepare_output_dir,
+    save_adapted_checkpoint,
+    save_metrics,
     select_fixed_support,
     validate_args,
 )
@@ -69,13 +74,88 @@ class FewShotArgumentTests(unittest.TestCase):
             root = Path(temporary_dir)
             output = root / "run"
             output.mkdir()
-            checkpoint = output / "checkpoint-last.pth"
+            checkpoint = output / "last.pth"
             checkpoint.write_bytes(b"checkpoint")
             self.assertEqual(prepare_output_dir(output, checkpoint), output.resolve())
             outside = root / "outside.pth"
             outside.write_bytes(b"checkpoint")
             with self.assertRaisesRegex(ValueError, "inside --output-dir"):
                 prepare_output_dir(output, outside)
+
+
+class FewShotArtifactTests(unittest.TestCase):
+    def test_metrics_csv_keeps_epochs_and_replaces_before_after_scores(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            path = Path(temporary_dir) / "metrics.csv"
+            save_metrics(
+                path,
+                [{"stage": "epoch", "epoch": 1, "loss": 0.5, "best_loss": 0.5}],
+            )
+            save_metrics(
+                path,
+                [{"stage": "epoch", "epoch": 2, "loss": 0.4, "best_loss": 0.4}],
+            )
+            save_metrics(
+                path,
+                [
+                    {"stage": "before", "accuracy": 0.6, "macro_f1": 0.5},
+                    {"stage": "after", "accuracy": 0.7, "macro_f1": 0.65},
+                    {"stage": "delta", "accuracy": 0.1, "macro_f1": 0.15},
+                ],
+                replace_stages={"before", "after", "delta"},
+            )
+            save_metrics(
+                path,
+                [
+                    {"stage": "before", "accuracy": 0.61, "macro_f1": 0.51},
+                    {"stage": "after", "accuracy": 0.71, "macro_f1": 0.66},
+                    {"stage": "delta", "accuracy": 0.1, "macro_f1": 0.15},
+                ],
+                replace_stages={"before", "after", "delta"},
+            )
+
+            metrics = pd.read_csv(path)
+            self.assertEqual(
+                metrics["stage"].tolist(),
+                ["epoch", "epoch", "before", "after", "delta"],
+            )
+            self.assertEqual(metrics.loc[:1, "epoch"].tolist(), [1.0, 2.0])
+            self.assertAlmostEqual(
+                metrics.loc[metrics["stage"] == "after", "accuracy"].item(),
+                0.71,
+            )
+
+    def test_checkpoint_embeds_support_instead_of_requiring_an_extra_file(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+
+            class Model:
+                encoder = nn.Linear(2, 2)
+                projection = nn.Identity()
+                embedding_dim = 2
+                temperature = 0.1
+
+            support = pd.DataFrame(
+                {"image_path": ["0.jpg", "1.jpg"], "diagnosis": [0, 1]}
+            )
+            args = argparse.Namespace(checkpoint=root / "base.pth", shots=1)
+            path = root / "last.pth"
+            save_adapted_checkpoint(
+                path,
+                Model(),
+                torch.zeros(2, 2),
+                torch.tensor([0, 1]),
+                args,
+                argparse.Namespace(image_size=224),
+                support,
+                epoch=0,
+                best_support_loss=0.5,
+                stale_epochs=0,
+            )
+
+            state = torch.load(path, map_location="cpu", weights_only=False)
+            self.assertEqual(state["support_rows"], support.to_dict(orient="records"))
+            self.assertNotIn("support_manifest", state)
 
 
 class DependencyTests(unittest.TestCase):
