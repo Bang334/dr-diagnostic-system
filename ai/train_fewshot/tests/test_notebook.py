@@ -21,6 +21,13 @@ class FewShotNotebookTests(unittest.TestCase):
         self.assertIn("prepare_deepdrid_target", self.source)
         self.assertNotIn("kaggle:", self.source.lower())
 
+    def test_checks_out_the_fewshot_fix_branch(self):
+        self.assertIn(
+            "GITHUB_BRANCH = 'fix/semi-pseudo-weight-batch4'",
+            self.source,
+        )
+        self.assertNotIn("feat/keras-grade-semi-supervised", self.source)
+
     def test_has_separate_train_resume_and_test_cells(self):
         self.assertIn("# TRAIN NEW", self.source)
         self.assertIn("# RESUME FEWSHOT", self.source)
