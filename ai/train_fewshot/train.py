@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -48,13 +49,29 @@ def log(message: str) -> None:
 METRIC_FIELDS = (
     "stage",
     "epoch",
-    "loss",
-    "best_loss",
+    "train_loss",
+    "selection_loss",
+    "best_selection_loss",
     "accuracy",
     "macro_f1",
     "balanced_accuracy",
     "qwk",
 )
+
+
+@dataclass
+class SelectionState:
+    best_loss: float = math.inf
+    stale_epochs: int = 0
+
+    def update(self, loss: float) -> bool:
+        improved = loss < self.best_loss
+        if improved:
+            self.best_loss = loss
+            self.stale_epochs = 0
+        else:
+            self.stale_epochs += 1
+        return improved
 
 
 def save_metrics(
@@ -111,6 +128,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Support images per class temporarily held out as query in each episode",
     )
     parser.add_argument(
+        "--selection-shots",
+        type=int,
+        default=1,
+        help=(
+            "Labeled images per class held out permanently from backpropagation "
+            "for checkpoint selection and early stopping"
+        ),
+    )
+    parser.add_argument(
         "--embedding-dim",
         type=int,
         default=0,
@@ -151,14 +177,19 @@ def validate_args(args: argparse.Namespace) -> None:
         "train_episodes",
         "shots",
         "queries",
+        "selection_shots",
         "forward_batch_size",
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
-    if args.queries > args.shots:
-        raise ValueError("--queries cannot exceed --shots")
-    if args.shots > 1 and args.queries >= args.shots:
-        raise ValueError("--queries must leave at least one prototype image per class")
+    if args.selection_shots >= args.shots:
+        raise ValueError("--selection-shots must be smaller than --shots")
+    adaptation_shots = args.shots - args.selection_shots
+    if args.queries >= adaptation_shots:
+        raise ValueError(
+            "--queries must leave at least one adaptation prototype image per "
+            "class after the fixed selection split"
+        )
     if args.embedding_dim < 0:
         raise ValueError("--embedding-dim cannot be negative")
     if args.unfreeze_last_blocks < 0:
@@ -182,24 +213,85 @@ def prepare_output_dir(output_dir: Path, resume: Optional[Path]) -> Path:
     return output_dir
 
 
+def _patient_id(image_path: Any) -> str:
+    return Path(str(image_path)).stem.split("_", 1)[0]
+
+
 def select_fixed_support(frame: pd.DataFrame, shots: int, seed: int) -> pd.DataFrame:
-    """Select exactly K target images per class once for the whole run."""
+    """Select K images per class from distinct patients across all grades."""
     rng = random.Random(seed)
-    selected: List[pd.DataFrame] = []
+    groups_by_grade: Dict[int, Dict[str, List[int]]] = {}
     for grade in range(NUM_CLASSES):
-        indices = frame.index[frame["diagnosis"] == grade].tolist()
+        class_frame = frame.loc[frame["diagnosis"] == grade]
+        indices = class_frame.index.tolist()
         if len(indices) < shots:
             raise ValueError(
                 f"Target train grade {grade} has {len(indices)} images but {shots}-shot "
                 "adaptation needs at least that many"
             )
-        chosen = rng.sample(indices, shots)
+        by_patient: Dict[str, List[int]] = {}
+        for index in indices:
+            patient_id = _patient_id(frame.at[index, "image_path"])
+            by_patient.setdefault(patient_id, []).append(index)
+        groups_by_grade[grade] = by_patient
+
+    grade_order = sorted(
+        range(NUM_CLASSES),
+        key=lambda grade: len(groups_by_grade[grade]),
+    )
+    used_patients = set()
+    selected_by_grade: Dict[int, pd.DataFrame] = {}
+    for grade in grade_order:
+        by_patient = groups_by_grade[grade]
+        patient_ids = [
+            patient_id
+            for patient_id in sorted(by_patient)
+            if patient_id not in used_patients
+        ]
+        rng.shuffle(patient_ids)
+        if len(patient_ids) < shots:
+            raise ValueError(
+                f"Target train grade {grade} has only {len(patient_ids)} unused "
+                f"patients; {shots}-shot patient-diverse adaptation needs more "
+                "independent patients"
+            )
+        chosen_patients = patient_ids[:shots]
+        chosen = [
+            rng.choice(by_patient[patient_id])
+            for patient_id in chosen_patients
+        ]
+        used_patients.update(chosen_patients)
         class_frame = frame.loc[chosen].copy()
         class_frame["support_rank"] = list(range(1, shots + 1))
-        selected.append(class_frame)
-    support = pd.concat(selected, ignore_index=True)
+        class_frame["support_patient_id"] = class_frame["image_path"].map(_patient_id)
+        selected_by_grade[grade] = class_frame
+    support = pd.concat(
+        [selected_by_grade[grade] for grade in range(NUM_CLASSES)],
+        ignore_index=True,
+    )
     support["support_seed"] = seed
     return support
+
+
+def split_fixed_support(
+    fixed_support: pd.DataFrame,
+    selection_shots: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Split the labeled budget into adaptation and fixed selection rows."""
+    adaptation: List[pd.DataFrame] = []
+    selection: List[pd.DataFrame] = []
+    for grade in range(NUM_CLASSES):
+        class_frame = (
+            fixed_support.loc[fixed_support["diagnosis"] == grade]
+            .sort_values("support_rank")
+            .copy()
+        )
+        selection.append(class_frame.tail(selection_shots))
+        adaptation.append(class_frame.iloc[:-selection_shots])
+    return (
+        pd.concat(adaptation, ignore_index=True),
+        pd.concat(selection, ignore_index=True),
+    )
 
 
 class FixedSupportEpisodeSampler:
@@ -408,19 +500,29 @@ def evaluate_protonet(
     *,
     batch_size: int,
     amp_enabled: bool,
-) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
+) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor, float]:
     model.eval()
     prototypes, class_ids = compute_prototypes(model, support_dataset, device)
     targets: List[int] = []
     predictions: List[int] = []
+    total_loss = 0.0
     loader = DataLoader(evaluation_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    for images, labels, _ in tqdm(loader, desc="few-shot-target-test", leave=False):
+    for images, labels, _ in tqdm(loader, desc="few-shot-eval", leave=False):
         images = images.to(device)
+        labels = labels.to(device)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
             logits = model.logits_from_prototypes(images, prototypes)
-        targets.extend(labels.tolist())
+            local_targets = _local_targets(labels, class_ids)
+            loss = F.cross_entropy(logits, local_targets, reduction="sum")
+        total_loss += float(loss)
+        targets.extend(labels.cpu().tolist())
         predictions.extend(class_ids[logits.argmax(dim=1)].cpu().tolist())
-    return calculate_metrics(targets, predictions), prototypes, class_ids
+    return (
+        calculate_metrics(targets, predictions),
+        prototypes,
+        class_ids,
+        total_loss / len(targets),
+    )
 
 
 def _dataset_args(saved_args: argparse.Namespace, args: argparse.Namespace) -> argparse.Namespace:
@@ -461,10 +563,11 @@ def save_adapted_checkpoint(
     class_ids: torch.Tensor,
     args: argparse.Namespace,
     saved_args: argparse.Namespace,
-    support_frame: pd.DataFrame,
+    adaptation_frame: pd.DataFrame,
+    selection_frame: pd.DataFrame,
     *,
     epoch: int,
-    best_support_loss: float,
+    best_selection_loss: float,
     stale_epochs: int,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scaler: Any = None,
@@ -484,11 +587,12 @@ def save_adapted_checkpoint(
             for key, value in vars(args).items()
         },
         "parent_checkpoint": os.fspath(args.checkpoint.resolve()),
-        "support_rows": support_frame.to_dict(orient="records"),
+        "adaptation_rows": adaptation_frame.to_dict(orient="records"),
+        "selection_rows": selection_frame.to_dict(orient="records"),
         "requires_support_set": False,
         "target_test_used_for_selection": False,
         "epoch": epoch,
-        "best_support_loss": best_support_loss,
+        "best_selection_loss": best_selection_loss,
         "stale_epochs": stale_epochs,
     }
     if optimizer is not None:
@@ -535,6 +639,7 @@ def run(args: argparse.Namespace) -> None:
         contract_keys = (
             "shots",
             "queries",
+            "selection_shots",
             "embedding_dim",
             "unfreeze_last_blocks",
             "temperature",
@@ -551,25 +656,36 @@ def run(args: argparse.Namespace) -> None:
                 + json.dumps(mismatches, default=str)
             )
     if resume_state is None:
-        support_frame = select_fixed_support(frames["train"], args.shots, args.seed)
+        fixed_support = select_fixed_support(frames["train"], args.shots, args.seed)
+        adaptation_frame, selection_frame = split_fixed_support(
+            fixed_support,
+            args.selection_shots,
+        )
     else:
-        support_rows = resume_state.get("support_rows")
-        if support_rows is not None:
-            support_frame = pd.DataFrame(support_rows)
-        else:
-            legacy_support_path = args.output_dir / "support_manifest.csv"
-            if not legacy_support_path.is_file():
-                raise FileNotFoundError(
-                    "Resume checkpoint does not embed its fixed support set and "
-                    f"the legacy manifest is missing: {legacy_support_path}"
-                )
-            support_frame = pd.read_csv(legacy_support_path)
-        expected_shots = int(resume_state["few_shot_args"]["shots"])
-        actual_counts = support_frame["diagnosis"].value_counts()
-        if not all(int(actual_counts.get(grade, 0)) == expected_shots for grade in range(NUM_CLASSES)):
-            raise ValueError("Support manifest no longer matches the resume checkpoint")
+        adaptation_rows = resume_state.get("adaptation_rows")
+        selection_rows = resume_state.get("selection_rows")
+        if adaptation_rows is None or selection_rows is None:
+            raise ValueError(
+                "This checkpoint predates independent selection. Start a new run "
+                "so best.pth is not selected from training loss."
+            )
+        adaptation_frame = pd.DataFrame(adaptation_rows)
+        selection_frame = pd.DataFrame(selection_rows)
+        expected_adaptation = args.shots - args.selection_shots
+        adaptation_counts = adaptation_frame["diagnosis"].value_counts()
+        selection_counts = selection_frame["diagnosis"].value_counts()
+        if not all(
+            int(adaptation_counts.get(grade, 0)) == expected_adaptation
+            and int(selection_counts.get(grade, 0)) == args.selection_shots
+            for grade in range(NUM_CLASSES)
+        ):
+            raise ValueError("Checkpoint support split no longer matches its configuration")
     log(
-        f"Fixed target support={len(support_frame)} ({len(support_frame) // NUM_CLASSES}/class); "
+        f"Fixed labeled target={len(adaptation_frame) + len(selection_frame)}; "
+        f"adaptation={len(adaptation_frame)} "
+        f"({len(adaptation_frame) // NUM_CLASSES}/class), "
+        f"selection={len(selection_frame)} "
+        f"({len(selection_frame) // NUM_CLASSES}/class); "
         f"target_train_total={len(frames['train'])}, target_validation_held_out={len(frames['val'])}, "
         f"target_test_held_out={len(frames['test'])}."
     )
@@ -577,8 +693,21 @@ def run(args: argparse.Namespace) -> None:
     image_size = int(getattr(saved_args, "image_size", 224))
     train_transform, eval_transform = build_transforms(image_size)
     data_args = _dataset_args(saved_args, args)
-    train_support_dataset = FundusDataset(support_frame, data_args, train_transform)
-    eval_support_dataset = FundusDataset(support_frame, data_args, eval_transform)
+    train_support_dataset = FundusDataset(
+        adaptation_frame,
+        data_args,
+        train_transform,
+    )
+    eval_support_dataset = FundusDataset(
+        adaptation_frame,
+        data_args,
+        eval_transform,
+    )
+    selection_dataset = FundusDataset(
+        selection_frame,
+        data_args,
+        eval_transform,
+    )
     target_test_dataset = FundusDataset(frames["test"], data_args, eval_transform)
 
     if args.eval_only:
@@ -604,11 +733,11 @@ def run(args: argparse.Namespace) -> None:
         model.projection.load_state_dict(resume_state["projection"])
         log(
             f"Loaded adapted checkpoint epoch={resume_state.get('epoch', -1) + 1}, "
-            f"best_support_loss={resume_state.get('best_support_loss')}."
+            f"best_selection_loss={resume_state.get('best_selection_loss')}."
         )
 
     if args.eval_only:
-        adapted_metrics, prototypes, class_ids = evaluate_protonet(
+        adapted_metrics, prototypes, class_ids, _ = evaluate_protonet(
             model,
             eval_support_dataset,
             target_test_dataset,
@@ -669,12 +798,11 @@ def run(args: argparse.Namespace) -> None:
         )
     optimizer = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
     scaler = create_scaler(amp_enabled)
-    sampler = FixedSupportEpisodeSampler(support_frame, args.seed)
+    sampler = FixedSupportEpisodeSampler(adaptation_frame, args.seed)
     start_epoch = 0
-    best_support_loss = math.inf
-    stale_epochs = 0
+    selection_state = SelectionState()
     if resume_state is not None:
-        required = {"optimizer", "epoch", "best_support_loss", "stale_epochs"}
+        required = {"optimizer", "epoch", "best_selection_loss", "stale_epochs"}
         missing = required.difference(resume_state)
         if missing:
             raise ValueError(f"Resume checkpoint missing state: {sorted(missing)}")
@@ -684,27 +812,27 @@ def run(args: argparse.Namespace) -> None:
         if resume_state.get("sampler_state") is not None:
             sampler.rng.setstate(resume_state["sampler_state"])
         start_epoch = int(resume_state["epoch"]) + 1
-        best_support_loss = float(resume_state["best_support_loss"])
-        stale_epochs = int(resume_state["stale_epochs"])
+        selection_state = SelectionState(
+            best_loss=float(resume_state["best_selection_loss"]),
+            stale_epochs=int(resume_state["stale_epochs"]),
+        )
         log(
             f"Resume restored: next_epoch={start_epoch + 1}/{args.epochs}, "
-            f"best_support_loss={best_support_loss:.6f}, "
-            f"patience={stale_epochs}/{args.patience}."
+            f"best_selection_loss={selection_state.best_loss:.6f}, "
+            f"patience={selection_state.stale_epochs}/{args.patience}."
         )
 
     for epoch in range(start_epoch, args.epochs):
         epoch_started = time.perf_counter()
         model.train()
         losses: List[float] = []
-        epoch_targets: List[int] = []
-        epoch_predictions: List[int] = []
         for _ in tqdm(
             range(args.train_episodes),
             desc=f"few-shot epoch {epoch + 1}/{args.epochs}",
             leave=True,
         ):
             optimizer.zero_grad(set_to_none=True)
-            loss, targets, predictions = run_episode(
+            loss, _, _ = run_episode(
                 model,
                 train_support_dataset,
                 sampler.sample(args.queries),
@@ -717,23 +845,24 @@ def run(args: argparse.Namespace) -> None:
             scaler.step(optimizer)
             scaler.update()
             losses.append(float(loss.detach()))
-            epoch_targets.extend(targets)
-            epoch_predictions.extend(predictions)
-        support_loss = sum(losses) / len(losses)
-        epoch_metrics = calculate_metrics(epoch_targets, epoch_predictions)
-        improved = support_loss < best_support_loss
-        if improved:
-            best_support_loss = support_loss
-            stale_epochs = 0
-        else:
-            stale_epochs += 1
+        train_loss = sum(losses) / len(losses)
+        selection_metrics, prototypes, class_ids, selection_loss = evaluate_protonet(
+            model,
+            eval_support_dataset,
+            selection_dataset,
+            device,
+            batch_size=args.forward_batch_size,
+            amp_enabled=amp_enabled,
+        )
+        improved = selection_state.update(selection_loss)
         record = {
             "stage": "epoch",
             "epoch": epoch + 1,
-            "loss": support_loss,
-            "best_loss": best_support_loss,
+            "train_loss": train_loss,
+            "selection_loss": selection_loss,
+            "best_selection_loss": selection_state.best_loss,
             **{
-                key: epoch_metrics[key]
+                key: selection_metrics[key]
                 for key in (
                     "accuracy",
                     "macro_f1",
@@ -748,13 +877,10 @@ def run(args: argparse.Namespace) -> None:
             + json.dumps(record, ensure_ascii=False)
         )
         save_metrics(metrics_path, [record])
-        prototypes, class_ids = compute_prototypes(
-            model, eval_support_dataset, device
-        )
         checkpoint_kwargs = {
             "epoch": epoch,
-            "best_support_loss": best_support_loss,
-            "stale_epochs": stale_epochs,
+            "best_selection_loss": selection_state.best_loss,
+            "stale_epochs": selection_state.stale_epochs,
             "optimizer": optimizer,
             "scaler": scaler,
             "sampler_state": sampler.rng.getstate(),
@@ -766,7 +892,8 @@ def run(args: argparse.Namespace) -> None:
             class_ids,
             args,
             saved_args,
-            support_frame,
+            adaptation_frame,
+            selection_frame,
             **checkpoint_kwargs,
         )
         if improved:
@@ -777,27 +904,35 @@ def run(args: argparse.Namespace) -> None:
                 class_ids,
                 args,
                 saved_args,
-                support_frame,
+                adaptation_frame,
+                selection_frame,
                 **checkpoint_kwargs,
             )
-        if stale_epochs >= args.patience:
-            log(f"Early stopping: no support-loss improvement for {stale_epochs} epochs.")
+        if selection_state.stale_epochs >= args.patience:
+            log(
+                "Early stopping: no fixed-selection loss improvement for "
+                f"{selection_state.stale_epochs} epochs."
+            )
             break
 
     summary = {
         "method": "fixed_support_target_domain_protonet",
-        "shots_per_class": args.shots,
-        "unique_labeled_target_images": len(support_frame),
+        "labeled_images_per_class": args.shots,
+        "adaptation_images_per_class": args.shots - args.selection_shots,
+        "selection_images_per_class": args.selection_shots,
+        "unique_labeled_target_images": len(adaptation_frame) + len(selection_frame),
         "support_seed": args.seed,
+        "patient_diverse_sampling": True,
+        "fixed_selection_used_for_checkpointing": True,
         "target_validation_used": False,
         "target_test_used_for_training": False,
         "target_test_used_for_model_selection": False,
         "target_test_evaluated_during_training": False,
         "requires_support_set_at_inference": False,
-        "best_support_loss": best_support_loss,
+        "best_selection_loss": selection_state.best_loss,
         "best_checkpoint": "best.pth",
         "last_checkpoint": "last.pth",
-        "selection_signal": "fixed-support episodic loss",
+        "selection_signal": "fixed held-out few-shot selection loss",
     }
     log(
         f"Few-shot training finished in {time.perf_counter() - run_started:.1f}s.\n"

@@ -28,15 +28,16 @@ Notebook tải và chuẩn hóa dataset trong runtime Colab tại `/content/dr_r
 
 1. Nạp checkpoint grading, đọc model/preprocessing từ metadata.
 2. Chuẩn hóa DeepDRiD v1.1 thành `train/validation/test` theo metadata chính thức.
-3. Từ target `train`, chọn đúng `K` ảnh mỗi grade một lần và nhúng support set
-   vào checkpoint.
-4. Mỗi episode tách tạm query khỏi fixed support; không lấy thêm ảnh target.
+3. Từ target `train`, chọn đúng `K` ảnh mỗi grade, ưu tiên bệnh nhân khác nhau.
+4. Giữ cố định `selection_shots` ảnh mỗi grade, không dùng chúng để backprop.
+   Phần còn lại là adaptation pool; mỗi episode chỉ tách query trong pool này.
 5. RETFound encoder sinh embedding; prototype mỗi grade là trung bình embedding
    support của grade đó.
 6. Fine-tune projection và block encoder cuối bằng episodic cross-entropy.
-7. Chọn checkpoint theo fixed-support episodic loss, không nhìn target test.
+7. Chọn checkpoint và early stopping theo loss trên fixed selection, không theo
+   training loss và không nhìn target test.
 8. Mỗi epoch cập nhật `last.pth`; bản tốt nhất lưu `best.pth`. Resume khôi phục
-   support set, optimizer, AMP scaler, epoch, patience và RNG của episode sampler.
+   adaptation/selection split, optimizer, AMP scaler, epoch, patience và RNG.
 9. Target test chỉ được đánh giá thủ công bằng `--eval-only` sau khi adaptation.
 
 ## Chạy
@@ -45,10 +46,11 @@ Notebook tải và chuẩn hóa dataset trong runtime Colab tại `/content/dr_r
 python -m ai.train_fewshot.train `
   --checkpoint D:\grade\best.pth `
   --target-dataset-dir D:\dr `
-  --output-dir D:\fs1 `
-  --shots 5 `
-  --queries 1 `
-  --epochs 8
+  --output-dir D:\fs2 `
+  --shots 10 `
+  --selection-shots 2 `
+  --queries 2 `
+  --epochs 20
 ```
 
 Resume:
@@ -56,7 +58,7 @@ Resume:
 ```powershell
 python -m ai.train_fewshot.train `
   ...cùng cấu hình và đường dẫn... `
-  --resume D:\fs1\last.pth
+  --resume D:\fs2\last.pth
 ```
 
 Test cuối:
@@ -64,13 +66,13 @@ Test cuối:
 ```powershell
 python -m ai.train_fewshot.train `
   ...cùng cấu hình và đường dẫn... `
-  --resume D:\fs1\best.pth `
+  --resume D:\fs2\best.pth `
   --eval-only
 ```
 
 Folder output chỉ có ba artifact:
 
-- `best.pth`: checkpoint có loss tốt nhất.
+- `best.pth`: checkpoint có fixed-selection loss tốt nhất.
 - `last.pth`: checkpoint epoch gần nhất để Resume.
-- `metrics.csv`: loss và score từng epoch; sau `--eval-only` có thêm ba dòng
-  `before`, `after`, `delta`.
+- `metrics.csv`: training loss, fixed-selection loss và fixed-selection score
+  từng epoch; sau `--eval-only` có thêm `before`, `after`, `delta`.

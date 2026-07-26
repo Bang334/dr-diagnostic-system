@@ -43,9 +43,11 @@ class FewShotNotebookTests(unittest.TestCase):
 
     def test_uses_one_short_run_directory_and_three_artifacts(self):
         self.assertIn(
-            "OUTPUT_DIR = Path('/content/drive/MyDrive/fs1')",
+            "OUTPUT_DIR = Path('/content/drive/MyDrive/fs2')",
             self.source,
         )
+        self.assertIn("'selection_shots': 2", self.source)
+        self.assertIn("--selection-shots", self.source)
         for name in ("best.pth", "last.pth", "metrics.csv"):
             self.assertIn(name, self.source)
         for old_name in (

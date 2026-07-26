@@ -9,11 +9,13 @@ import torch.nn as nn
 
 from ai.train_fewshot.train import (
     FixedSupportEpisodeSampler,
+    SelectionState,
     parse_args,
     prepare_output_dir,
     save_adapted_checkpoint,
     save_metrics,
     select_fixed_support,
+    split_fixed_support,
     validate_args,
 )
 
@@ -23,9 +25,10 @@ class FewShotSelectionTests(unittest.TestCase):
         return pd.DataFrame(
             {
                 "image_path": [
-                    f"{grade}_{index}.jpg"
+                    f"p{grade}-{patient}_{view}.jpg"
                     for grade in range(5)
-                    for index in range(10)
+                    for patient in range(5)
+                    for view in ("l1", "l2")
                 ],
                 "diagnosis": [
                     grade for grade in range(5) for _ in range(10)
@@ -39,11 +42,42 @@ class FewShotSelectionTests(unittest.TestCase):
         self.assertEqual(first["diagnosis"].value_counts().sort_index().tolist(), [5] * 5)
         self.assertEqual(first["image_path"].tolist(), second["image_path"].tolist())
 
-    def test_episode_query_never_adds_images_outside_fixed_support(self):
+    def test_selection_prefers_distinct_patients_within_each_grade(self):
         support = select_fixed_support(self.frame(), shots=5, seed=42)
-        sampler = FixedSupportEpisodeSampler(support, seed=42)
+        patient_counts = (
+            support.groupby("diagnosis")["support_patient_id"].nunique().sort_index()
+        )
+        self.assertEqual(patient_counts.tolist(), [5] * 5)
+        self.assertEqual(support["support_patient_id"].nunique(), 25)
+
+    def test_fixed_selection_rows_never_enter_adaptation_pool(self):
+        fixed = select_fixed_support(self.frame(), shots=5, seed=42)
+        adaptation, selection = split_fixed_support(fixed, selection_shots=2)
+        self.assertEqual(
+            adaptation["diagnosis"].value_counts().sort_index().tolist(),
+            [3] * 5,
+        )
+        self.assertEqual(
+            selection["diagnosis"].value_counts().sort_index().tolist(),
+            [2] * 5,
+        )
+        self.assertTrue(
+            set(adaptation["image_path"]).isdisjoint(selection["image_path"])
+        )
+        self.assertTrue(
+            set(adaptation["support_patient_id"]).isdisjoint(
+                selection["support_patient_id"]
+            )
+        )
+
+    def test_episode_query_never_adds_images_outside_fixed_support(self):
+        fixed = select_fixed_support(self.frame(), shots=5, seed=42)
+        adaptation, _ = split_fixed_support(fixed, selection_shots=1)
+        sampler = FixedSupportEpisodeSampler(adaptation, seed=42)
         support_indices, _, query_indices, _ = sampler.sample(queries=1)
-        self.assertTrue(set(support_indices + query_indices).issubset(set(support.index)))
+        self.assertTrue(
+            set(support_indices + query_indices).issubset(set(adaptation.index))
+        )
         self.assertTrue(set(support_indices).isdisjoint(query_indices))
 
 
@@ -62,8 +96,22 @@ class FewShotArgumentTests(unittest.TestCase):
         args = self.args()
         self.assertEqual(args.shots, 5)
         self.assertEqual(args.queries, 1)
+        self.assertEqual(args.selection_shots, 1)
         self.assertEqual(args.unfreeze_last_blocks, 1)
         self.assertEqual(args.patience, 3)
+
+    def test_queries_must_leave_adaptation_prototypes_after_selection_split(self):
+        with self.assertRaisesRegex(ValueError, "selection"):
+            validate_args(
+                self.args(
+                    "--shots",
+                    "3",
+                    "--selection-shots",
+                    "1",
+                    "--queries",
+                    "2",
+                )
+            )
 
     def test_eval_only_requires_resume(self):
         with self.assertRaisesRegex(ValueError, "requires --resume"):
@@ -84,16 +132,42 @@ class FewShotArgumentTests(unittest.TestCase):
 
 
 class FewShotArtifactTests(unittest.TestCase):
+    def test_selection_state_tracks_independent_loss_for_early_stopping(self):
+        state = SelectionState()
+        self.assertTrue(state.update(1.0))
+        self.assertTrue(state.update(0.8))
+        self.assertFalse(state.update(0.9))
+        self.assertEqual(state.best_loss, 0.8)
+        self.assertEqual(state.stale_epochs, 1)
+
     def test_metrics_csv_keeps_epochs_and_replaces_before_after_scores(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             path = Path(temporary_dir) / "metrics.csv"
             save_metrics(
                 path,
-                [{"stage": "epoch", "epoch": 1, "loss": 0.5, "best_loss": 0.5}],
+                [
+                    {
+                        "stage": "epoch",
+                        "epoch": 1,
+                        "train_loss": 0.5,
+                        "selection_loss": 0.8,
+                        "best_selection_loss": 0.8,
+                        "accuracy": 0.6,
+                    }
+                ],
             )
             save_metrics(
                 path,
-                [{"stage": "epoch", "epoch": 2, "loss": 0.4, "best_loss": 0.4}],
+                [
+                    {
+                        "stage": "epoch",
+                        "epoch": 2,
+                        "train_loss": 0.4,
+                        "selection_loss": 0.9,
+                        "best_selection_loss": 0.8,
+                        "accuracy": 0.5,
+                    }
+                ],
             )
             save_metrics(
                 path,
@@ -138,6 +212,9 @@ class FewShotArtifactTests(unittest.TestCase):
             support = pd.DataFrame(
                 {"image_path": ["0.jpg", "1.jpg"], "diagnosis": [0, 1]}
             )
+            selection = pd.DataFrame(
+                {"image_path": ["2.jpg", "3.jpg"], "diagnosis": [0, 1]}
+            )
             args = argparse.Namespace(checkpoint=root / "base.pth", shots=1)
             path = root / "last.pth"
             save_adapted_checkpoint(
@@ -148,13 +225,21 @@ class FewShotArtifactTests(unittest.TestCase):
                 args,
                 argparse.Namespace(image_size=224),
                 support,
+                selection,
                 epoch=0,
-                best_support_loss=0.5,
+                best_selection_loss=0.5,
                 stale_epochs=0,
             )
 
             state = torch.load(path, map_location="cpu", weights_only=False)
-            self.assertEqual(state["support_rows"], support.to_dict(orient="records"))
+            self.assertEqual(
+                state["adaptation_rows"],
+                support.to_dict(orient="records"),
+            )
+            self.assertEqual(
+                state["selection_rows"],
+                selection.to_dict(orient="records"),
+            )
             self.assertNotIn("support_manifest", state)
 
 
