@@ -16,10 +16,15 @@ class FewShotNotebookTests(unittest.TestCase):
         )
 
     def test_uses_official_pinned_deepdrid_release(self):
-        self.assertIn("deepdrdoc/DeepDRiD.git", self.source)
-        self.assertIn("'v1.1'", self.source)
+        self.assertIn("zenodo.org/records/8248825", self.source)
+        self.assertIn("3379e2fd7a2dd398545a67148420a5d3", self.source)
         self.assertIn("prepare_deepdrid_target", self.source)
         self.assertNotIn("kaggle:", self.source.lower())
+
+    def test_downloads_dataset_to_colab_local_storage(self):
+        self.assertIn("DATASET_ROOT = Path('/content/datasets')", self.source)
+        self.assertIn("shutil.unpack_archive", self.source)
+        self.assertNotIn("DRIVE_ROOT / 'datasets'", self.source)
 
     def test_checks_out_the_fewshot_fix_branch(self):
         self.assertIn(
