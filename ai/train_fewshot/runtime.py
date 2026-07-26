@@ -211,7 +211,10 @@ def prepare_deepdrid_target(source_root: Path, output_dir: Path) -> Path:
             try:
                 os.link(source, destination)
             except OSError:
-                destination.symlink_to(source)
+                try:
+                    destination.symlink_to(source)
+                except OSError:
+                    shutil.copyfile(source, destination)
 
     official_splits = {
         "train": ("regular-fundus-training", "regular-fundus-training.csv"),
