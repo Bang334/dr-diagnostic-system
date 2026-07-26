@@ -88,6 +88,17 @@ export const api = {
   },
 
   // Screening history for a patient
+  getScreeningModels: async () => {
+    const response = await fetch(`${API_BASE_URL}/screenings/models`, {
+      method: 'GET',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error('Không thể tải danh sách model nhận diện.');
+    }
+    return response.json();
+  },
+
   getPatientScreenings: async (patientId) => {
     const response = await fetch(`${API_BASE_URL}/screenings/patient/${patientId}`, {
       method: 'GET',
@@ -132,9 +143,10 @@ export const api = {
     return response.json();
   },
 
-  uploadScreening: async (patientId, files) => {
+  uploadScreening: async (patientId, files, gradingModel = 'grading') => {
     const form = new FormData();
     form.append('patient_id', patientId);
+    form.append('grading_model', gradingModel);
     Object.entries(files).forEach(([key, file]) => form.append(key, file));
     const token = localStorage.getItem('token');
     const response = await fetch(`${API_BASE_URL}/screenings/upload`, {

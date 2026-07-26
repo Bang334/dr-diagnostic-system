@@ -45,6 +45,22 @@ import { useAppDialog } from './components/AppDialogProvider';
 import ProjectEvidencePage from './components/ProjectEvidencePage';
 
 const RECALL_MONTH_OPTIONS = [1, 2, 3, 6, 12];
+const DEFAULT_GRADING_MODELS = [
+  {
+    id: 'grading',
+    label: 'Grading gốc',
+    checkpoint: 'checkpoint-best.pth',
+    description: 'Classifier RETFound 5 mức DR, dùng checkpoint grading gốc.',
+    ready: true,
+  },
+  {
+    id: 'fewshot',
+    label: 'Few-shot DeepDRiD',
+    checkpoint: 'best-fewshot.pth',
+    description: 'RETFound ProtoNet đã thích nghi trên tập DeepDRiD few-shot.',
+    ready: true,
+  },
+];
 
 const addMonthsToToday = (months) => {
   const today = new Date();
@@ -227,6 +243,8 @@ function App() {
   // Screening States
   const [screeningPatient, setScreeningPatient] = useState(null);
   const [selectedFiles, setSelectedFiles] = useState({});
+  const [gradingModels, setGradingModels] = useState(DEFAULT_GRADING_MODELS);
+  const [selectedGradingModel, setSelectedGradingModel] = useState('grading');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [showMasks, setShowMasks] = useState({ left_eye: false, right_eye: false });
@@ -274,6 +292,31 @@ function App() {
       fetchPatients();
     }
   }, [currentUser, searchQuery]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role === 'patient') return;
+    let cancelled = false;
+    api.getScreeningModels()
+      .then((data) => {
+        if (cancelled || !Array.isArray(data.models)) return;
+        const descriptions = Object.fromEntries(
+          DEFAULT_GRADING_MODELS.map((model) => [model.id, model.description]),
+        );
+        const models = data.models.map((model) => ({
+          ...model,
+          description: descriptions[model.id] || 'Model phân độ võng mạc cục bộ.',
+        }));
+        setGradingModels(models);
+        const nextModel = models.find(
+          (model) => model.id === data.default && model.ready,
+        ) || models.find((model) => model.ready);
+        if (nextModel) setSelectedGradingModel(nextModel.id);
+      })
+      .catch((error) => console.warn('Could not load grading model options', error));
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
 
   const fetchPatients = async () => {
     try {
@@ -364,6 +407,10 @@ function App() {
       ? analysisResult.rule_summary
       : analysisResult.clinical_summary)
     : null;
+  const selectedGradingModelInfo = gradingModels.find(
+    (model) => model.id === selectedGradingModel,
+  ) || DEFAULT_GRADING_MODELS[0];
+  const isSelectedGradingModelReady = Boolean(selectedGradingModelInfo.ready);
   const canReviewScreening = currentUser?.role === 'admin'
     || (
       currentUser?.role === 'doctor'
@@ -384,11 +431,15 @@ function App() {
   };
 
   const startAnalysis = async () => {
-    if (!hasScreeningImage || !screeningPatient) return;
+    if (!hasScreeningImage || !screeningPatient || !isSelectedGradingModelReady) return;
     setIsAnalyzing(true);
     setIsUploadCollapsed(true);
     try {
-      const result = await api.uploadScreening(screeningPatient.id, selectedFiles);
+      const result = await api.uploadScreening(
+        screeningPatient.id,
+        selectedFiles,
+        selectedGradingModel,
+      );
       setAnalysisResult(result);
       setSummarySource(result.clinical_summary?.status === 'generated' ? 'ai' : 'rules');
       try {
@@ -892,6 +943,45 @@ function App() {
               )}
             </div>
 
+            <section className="card grading-model-selector" aria-labelledby="grading-model-label">
+              <div className="grading-model-selector-copy">
+                <span className="grading-model-icon" aria-hidden="true">
+                  <Gauge size={22} />
+                </span>
+                <div>
+                  <label id="grading-model-label" htmlFor="grading-model">
+                    Model nhận diện DR
+                  </label>
+                  <p>{selectedGradingModelInfo.description}</p>
+                </div>
+              </div>
+              <div className="grading-model-control">
+                <select
+                  id="grading-model"
+                  value={selectedGradingModel}
+                  disabled={isAnalyzing}
+                  onChange={(event) => {
+                    setSelectedGradingModel(event.target.value);
+                    setAnalysisResult(null);
+                    setCurrentScreeningDetail(null);
+                    setSummarySource('ai');
+                  }}
+                >
+                  {gradingModels.map((model) => (
+                    <option key={model.id} value={model.id} disabled={!model.ready}>
+                      {model.label} · {model.checkpoint}{model.ready ? '' : ' (không tìm thấy tệp)'}
+                    </option>
+                  ))}
+                </select>
+                <span
+                  className={`model-readiness ${isSelectedGradingModelReady ? 'is-ready' : 'is-missing'}`}
+                  role="status"
+                >
+                  {isSelectedGradingModelReady ? 'Checkpoint sẵn sàng' : 'Checkpoint chưa sẵn sàng'}
+                </span>
+              </div>
+            </section>
+
             <div className="screening-grid" style={{ display: 'grid', gridTemplateColumns: isUploadCollapsed && (analysisResult || isAnalyzing) ? '250px 1fr' : '1fr 1fr', gap: '30px' }}>
               {/* Cột Upload */}
               {isUploadCollapsed && (analysisResult || isAnalyzing) ? (
@@ -950,7 +1040,7 @@ function App() {
                     <button
                       className="btn btn-primary"
                       style={{ flex: 1, padding: '14px' }}
-                      disabled={!hasScreeningImage || isAnalyzing || !screeningPatient}
+                      disabled={!hasScreeningImage || isAnalyzing || !screeningPatient || !isSelectedGradingModelReady}
                       onClick={startAnalysis}
                     >
                       {isAnalyzing ? 'AI đang phân tích...' : 'Bắt đầu phân tích AI'}
@@ -1001,7 +1091,6 @@ function App() {
                           <span className="badge" style={{ backgroundColor: colors.drGrades[grade].color, color: '#fff' }}>{Math.round(eye.ai_result.confidence * 100)}%</span>
                         </div>
                         <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Ưu tiên rà soát: <strong>{eye.review_priority === 'prompt' ? 'Cao (Cần rà soát sớm)' : eye.review_priority}</strong> · Hẹn: <strong>{eye.follow_up_window}</strong></div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Hoàng điểm: <strong>{eye.macular_status === 'indeterminate_requires_macular_assessment' ? 'Nghi ngờ Phù Hoàng Điểm (Cần kiểm tra kỹ)' : eye.macular_status}</strong></div>
                         <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{eye.referral}</div>
 
                         {/* Image Preview & AI Overlay Toggle */}

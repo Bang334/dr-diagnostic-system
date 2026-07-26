@@ -23,6 +23,13 @@ def _first_env(*names: str, default: str = "") -> str:
     return default
 
 
+def _backend_path(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return str(path.resolve())
+
+
 class Settings:
     PROJECT_NAME: str = "Diabetic Retinopathy Screening System"
     PROJECT_VERSION: str = "1.0.0"
@@ -69,9 +76,13 @@ class Settings:
     ).strip()
 
     # Local RETFound-DINOv2 grading checkpoint used by the screening workflow.
-    DR_MODEL_PATH: str = os.getenv(
-        "DR_MODEL_PATH", str(BASE_DIR / "checkpoint-best.pth")
+    DR_MODEL_PATH: str = _backend_path(
+        os.getenv("DR_MODEL_PATH", "checkpoint-best.pth")
     )
+    DR_FEWSHOT_MODEL_PATH: str = _backend_path(
+        os.getenv("DR_FEWSHOT_MODEL_PATH", "best-fewshot.pth")
+    )
+    DR_DEFAULT_MODEL: str = os.getenv("DR_DEFAULT_MODEL", "grading")
     DR_DEVICE: str = os.getenv("DR_DEVICE", "auto")
     DR_PREPROCESS_ENHANCE: bool = os.getenv("DR_PREPROCESS_ENHANCE", "0") == "1"
     DR_MAX_UPLOAD_BYTES: int = int(
