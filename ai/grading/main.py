@@ -17,7 +17,7 @@ from ai.grading.model_handler import DRModelHandler
 
 app = FastAPI(
     title="Diabetic Retinopathy Grading API (Thành viên 1)",
-    description="API chạy mô hình EfficientNet-B3 phân loại cấp độ DR.",
+    description="API chạy mô hình EfficientNet phân loại cấp độ DR.",
     version="1.0"
 )
 

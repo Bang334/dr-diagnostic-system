@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.applications import EfficientNetB3
+from tensorflow.keras.applications import EfficientNetB3, EfficientNetB4
 from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
 
 
@@ -106,6 +106,7 @@ class DRModelHandler:
     def _read_saved_model_config(self):
         defaults = {
             "input_shape": (384, 384, 3),
+            "model_name": "EfficientNetB3",
             "head_dense1_units": 256,
             "head_dense2_units": 256,
             "head_drop1_rate": 0.4,
@@ -119,6 +120,12 @@ class DRModelHandler:
                 name = layer_config.get("name")
                 if layer["class_name"] == "InputLayer" and layer_config.get("batch_shape"):
                     defaults["input_shape"] = tuple(layer_config["batch_shape"][1:])
+                elif layer["class_name"] == "Functional":
+                    backbone_name = str(layer_config.get("name", "")).lower()
+                    if backbone_name == "efficientnetb4":
+                        defaults["model_name"] = "EfficientNetB4"
+                    elif backbone_name == "efficientnetb3":
+                        defaults["model_name"] = "EfficientNetB3"
                 elif name == "head_dense1":
                     defaults["head_dense1_units"] = int(layer_config["units"])
                 elif name == "head_dense2":
@@ -135,6 +142,7 @@ class DRModelHandler:
         """Rebuild the training graph for Keras-version-compatible weight loading."""
         saved_config = self._read_saved_model_config()
         input_shape = saved_config["input_shape"]
+        model_name = saved_config["model_name"]
 
         augmentation = models.Sequential(
             [
@@ -151,9 +159,13 @@ class DRModelHandler:
         inputs = layers.Input(shape=input_shape)
         features = augmentation(inputs)
         features = PreprocessInputLayer(
-            model_name="EfficientNetB3", name="preprocess_input"
+            model_name=model_name, name="preprocess_input"
         )(features)
-        backbone = EfficientNetB3(
+        backbone_class = {
+            "EfficientNetB3": EfficientNetB3,
+            "EfficientNetB4": EfficientNetB4,
+        }[model_name]
+        backbone = backbone_class(
             weights=None,
             include_top=False,
             input_shape=input_shape,
@@ -207,6 +219,15 @@ class DRModelHandler:
                 self.model.load_weights(self.model_path)
             height, width = self.model.input_shape[1:3]
             self.input_size = (int(width), int(height))
+            backbone_names = {
+                layer.name.lower()
+                for layer in self.model.layers
+                if layer.name.lower() in {"efficientnetb3", "efficientnetb4"}
+            }
+            if "efficientnetb4" in backbone_names:
+                self.model_version = "efficientnet_b4_rgb_crop_v1_continued"
+            elif "efficientnetb3" in backbone_names:
+                self.model_version = "efficientnet_b3_rgb_crop_v1"
 
             if self.threshold_path and os.path.isfile(self.threshold_path):
                 thresholds = np.load(self.threshold_path).astype(np.float32).reshape(-1)

@@ -27,9 +27,10 @@ print("[INFO] Random seed set to 42 (numpy, tf, python random)")
 tf.config.optimizer.set_jit(True)
 print("[INFO] XLA JIT compilation enabled")
 
-from tensorflow.keras.applications import EfficientNetB3, ResNet50, ConvNeXtTiny
+from tensorflow.keras.applications import EfficientNetB3, EfficientNetB4, EfficientNetV2S, ResNet50, ConvNeXtTiny
 from tensorflow.keras.applications.resnet50 import preprocess_input as resnet_preprocess
 from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as effnet_v2_preprocess
 from tensorflow.keras.applications.convnext import preprocess_input as convnext_preprocess
 from tensorflow.keras import layers, models, optimizers, callbacks
 import matplotlib.pyplot as plt
@@ -89,13 +90,20 @@ if os.path.exists('/content/'):
 # ============================================================
 #  CẤU HÌNH TRAINING
 # ============================================================
-# Lựa chọn mô hình: 'EfficientNetB3', 'ResNet50', hoặc 'ConvNeXtTiny'
-MODEL_NAME = "EfficientNetB3"
-EXPERIMENT_NAME = f"{MODEL_NAME}_rgb_crop_v1"
+# Lựa chọn mô hình: 'EfficientNetB4', 'EfficientNetV2S', 'EfficientNetB3',
+# 'ResNet50', hoặc 'ConvNeXtTiny'.
+MODEL_NAME = "EfficientNetB4"
+BASE_EXPERIMENT_NAME = f"{MODEL_NAME}_rgb_crop_v1"
+PROGRESSIVE_RESIZE = True
+SOURCE_EXPERIMENT_NAME = f"{BASE_EXPERIMENT_NAME}_continued"
+CONTINUE_PHASE2 = False
+CONTINUE_EPOCHS = 10
+PROGRESSIVE_EPOCHS = 8
+EXPERIMENT_NAME = f"{BASE_EXPERIMENT_NAME}_448"
 
 # Tự động cấu hình kích thước ảnh tùy theo mô hình
-if MODEL_NAME == 'EfficientNetB3':
-    IMG_SIZE = 384
+if MODEL_NAME in ('EfficientNetB3', 'EfficientNetB4', 'EfficientNetV2S'):
+    IMG_SIZE = 448 if PROGRESSIVE_RESIZE else 384
 elif MODEL_NAME == 'ResNet50':
     IMG_SIZE = 224
 elif MODEL_NAME == 'ConvNeXtTiny':
@@ -103,17 +111,22 @@ elif MODEL_NAME == 'ConvNeXtTiny':
 else:
     IMG_SIZE = 224 # Default
 
-BATCH_SIZE  = 16   # Default batch size (adjustable 32–64 depending on GPU)
+# Progressive resize B4 448 dùng batch 4 để phù hợp Colab T4.
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '4' if PROGRESSIVE_RESIZE else '8'))
+if BATCH_SIZE not in (4, 8) or (PROGRESSIVE_RESIZE and BATCH_SIZE != 4):
+    raise ValueError("B4 448 yêu cầu BATCH_SIZE=4; B4 384 hỗ trợ 4 hoặc 8.")
 NUM_CLASSES = 5
-EPOCHS_HEAD = 8    # Warm‑up epochs for head
-EPOCHS_TUNE = 25   # Giảm xuống 25; EarlyStopping sẽ dừng sớm nếu hội tụ — tránh timeout 12h
-LABEL_SMOOTHING = 0.05
+EPOCHS_HEAD = 5    # Warm-up head ngắn trước khi mở backbone pretrained
+EPOCHS_TUNE = 30   # B3/V2S còn cải thiện muộn; EarlyStopping vẫn kiểm soát overfit
+LABEL_SMOOTHING = 0.02
 TTA_AUGMENTATIONS = 2  # Validation và test phải dùng cùng một quy trình suy luận
-THRESHOLD_MIN = 0.30
+THRESHOLD_OBJECTIVE = "accuracy"  # "accuracy" hoặc "ordinal"
+THRESHOLD_MIN = 0.20
 THRESHOLD_MAX = 0.70
-THRESHOLD_STEPS = 81
+THRESHOLD_STEPS = 101  # Bước 0.005 trên khoảng [0.20, 0.70]
+RESULT_EXPERIMENT_NAME = f"{EXPERIMENT_NAME}_{THRESHOLD_OBJECTIVE}_threshold"
 USE_CLASS_WEIGHTS = False
-EVALUATE_ONLY = True  # Load best checkpoint and tune/evaluate thresholds without training.
+EVALUATE_ONLY = False
 CLASS_WEIGHT_POWER = 0.5  # sqrt inverse frequency is more stable than full inverse frequency
 MAX_CLASS_WEIGHT = 5.0
 AUDIT_EXACT_DUPLICATES = False  # True is thorough but reads every image once
@@ -374,13 +387,17 @@ class PreprocessInputLayer(layers.Layer):
     Layer chuẩn hóa đầu vào thay cho layers.Lambda(preprocess_input).
     Được đăng ký với @register_keras_serializable nên có thể load/save model đúng cách.
     """
-    def __init__(self, model_name='EfficientNetB3', **kwargs):
+    def __init__(self, model_name='EfficientNetB4', **kwargs):
         super().__init__(**kwargs)
         self.model_name = model_name
 
     def call(self, x):
         if self.model_name == 'EfficientNetB3':
             return effnet_preprocess(x)
+        elif self.model_name == 'EfficientNetB4':
+            return effnet_preprocess(x)
+        elif self.model_name == 'EfficientNetV2S':
+            return effnet_v2_preprocess(x)
         elif self.model_name == 'ResNet50':
             return resnet_preprocess(x)
         elif self.model_name == 'ConvNeXtTiny':
@@ -424,13 +441,13 @@ class GeMPoolingLayer(layers.Layer):
 def build_model():
     # Data Augmentation cải thiện — thêm nhiều transform + CutOut
     data_augmentation = models.Sequential([
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(0.05),
-        layers.RandomZoom((-0.10, 0.10)),
-        # Mức nhẹ giúp model bền hơn với khác biệt camera/chiếu sáng, kể cả ảnh raw.
-        layers.RandomContrast(0.10),
-        layers.RandomTranslation(0.02, 0.02),
-        CutOutLayer(mask_size_ratio=0.0),
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.10),
+        layers.RandomZoom((-0.12, 0.08)),
+        layers.RandomContrast(0.15),
+        layers.RandomBrightness(0.10, value_range=(0.0, 255.0)),
+        layers.RandomTranslation(0.04, 0.04),
+        CutOutLayer(mask_size_ratio=0.04),
     ], name="data_augmentation")
 
     inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
@@ -439,6 +456,22 @@ def build_model():
     if MODEL_NAME == 'EfficientNetB3':
         x = PreprocessInputLayer(model_name='EfficientNetB3', name="preprocess_input")(x)
         base_model = EfficientNetB3(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
+    elif MODEL_NAME == 'EfficientNetB4':
+        x = PreprocessInputLayer(model_name='EfficientNetB4', name="preprocess_input")(x)
+        base_model = EfficientNetB4(
+            # Progressive resize sẽ nhận toàn bộ weights từ checkpoint 384.
+            weights=None if PROGRESSIVE_RESIZE else 'imagenet',
+            include_top=False,
+            input_shape=(IMG_SIZE, IMG_SIZE, 3),
+        )
+    elif MODEL_NAME == 'EfficientNetV2S':
+        x = PreprocessInputLayer(model_name='EfficientNetV2S', name="preprocess_input")(x)
+        base_model = EfficientNetV2S(
+            weights='imagenet',
+            include_top=False,
+            input_shape=(IMG_SIZE, IMG_SIZE, 3),
+            include_preprocessing=True,
+        )
     elif MODEL_NAME == 'ResNet50':
         x = PreprocessInputLayer(model_name='ResNet50', name="preprocess_input")(x)
         base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
@@ -480,17 +513,51 @@ print(f"{'='*65}")
 # RESUME: Load checkpoint nếu đã tồn tại (tránh mất progress khi Colab crash)
 # ----------------------------------------------------
 checkpoint_path = os.path.join(MODELS_DIR, f"best_{EXPERIMENT_NAME}.keras")
-
-if EVALUATE_ONLY and not os.path.exists(checkpoint_path):
-    raise FileNotFoundError(
-        f"EVALUATE_ONLY=True but checkpoint was not found: {checkpoint_path}"
+source_checkpoint_path = checkpoint_path
+if PROGRESSIVE_RESIZE and not EVALUATE_ONLY:
+    source_checkpoint_path = os.path.join(
+        MODELS_DIR,
+        f"best_{SOURCE_EXPERIMENT_NAME}.keras"
+    )
+elif CONTINUE_PHASE2 and not EVALUATE_ONLY:
+    source_checkpoint_path = os.path.join(
+        MODELS_DIR,
+        f"best_{BASE_EXPERIMENT_NAME}.keras"
     )
 
-if os.path.exists(checkpoint_path):
-    print(f"[RESUME] ⚡ Tìm thấy checkpoint tại: {checkpoint_path}")
+if (EVALUATE_ONLY or CONTINUE_PHASE2 or PROGRESSIVE_RESIZE) and not os.path.exists(source_checkpoint_path):
+    raise FileNotFoundError(
+        f"Checkpoint nguồn không tồn tại: {source_checkpoint_path}"
+    )
+
+if PROGRESSIVE_RESIZE and not EVALUATE_ONLY:
+    print(f"[PROGRESSIVE] Load trọng số nguồn: {source_checkpoint_path}")
+    source_model = tf.keras.models.load_model(
+        source_checkpoint_path,
+        custom_objects={
+            'ordinal_loss': ordinal_loss,
+            'CohenKappaMetric': CohenKappaMetric,
+            'CutOutLayer': CutOutLayer,
+            'PreprocessInputLayer': PreprocessInputLayer,
+            'GeMPoolingLayer': GeMPoolingLayer,
+        }
+    )
+    model, base_model = build_model()
+    try:
+        model.set_weights(source_model.get_weights())
+    except ValueError as exc:
+        raise ValueError(
+            "Không thể chuyển weights từ B4 384 sang B4 448. "
+            "Hãy kiểm tra checkpoint có đúng kiến trúc B4 CORAL hay không."
+        ) from exc
+    del source_model
+    print(f"[PROGRESSIVE] Đã chuyển weights sang model input {IMG_SIZE}x{IMG_SIZE}.")
+    phase1_history = None
+elif os.path.exists(source_checkpoint_path):
+    print(f"[RESUME] ⚡ Tìm thấy checkpoint tại: {source_checkpoint_path}")
     print(f"[RESUME] Đang load model để tiếp tục training...")
     model = tf.keras.models.load_model(
-        checkpoint_path,
+        source_checkpoint_path,
         custom_objects={
             'ordinal_loss': ordinal_loss,
             'CohenKappaMetric': CohenKappaMetric,
@@ -502,6 +569,8 @@ if os.path.exists(checkpoint_path):
     # Lấy lại base_model từ layer của model đã load (để dùng trong Phase 2)
     backbone_layer_name = {
         'EfficientNetB3': 'efficientnetb3',
+        'EfficientNetB4': 'efficientnetb4',
+        'EfficientNetV2S': 'efficientnetv2-s',
         'ResNet50': 'resnet50',
         'ConvNeXtTiny': 'convnext_tiny',
     }[MODEL_NAME]
@@ -545,8 +614,8 @@ else:
 print(f"\n[PHASE 2] FINE-TUNING TOP LAYERS OF BACKBONE")
 base_model.trainable = True
 
-# Fine-tune 30% cuối backbone. EfficientNet vẫn giữ phần đặc trưng cơ bản ổn định.
-freeze_ratio = 0.7
+# Fine-tune 35% cuối B4; phần đầu giữ các đặc trưng ImageNet ổn định.
+freeze_ratio = 0.65
 num_layers = len(base_model.layers)
 freeze_until = int(num_layers * freeze_ratio)
 
@@ -555,8 +624,20 @@ for layer in base_model.layers[:freeze_until]:
     
 print(f"[INFO] Đã đóng băng {freeze_until}/{num_layers} lớp đầu tiên ({freeze_ratio*100:.0f}%). Chỉ train {num_layers - freeze_until} lớp cuối.")
 
-# LR cố định 2e-5 + ReduceLROnPlateau (thay CosineDecay)
-initial_lr = 1e-5
+# Progressive resize dùng LR rất thấp để thích nghi với độ phân giải mới.
+low_lr_run = CONTINUE_PHASE2 or PROGRESSIVE_RESIZE
+initial_lr = 1e-6 if PROGRESSIVE_RESIZE else (3e-6 if CONTINUE_PHASE2 else 1e-5)
+phase2_epochs = (
+    PROGRESSIVE_EPOCHS if PROGRESSIVE_RESIZE
+    else (CONTINUE_EPOCHS if CONTINUE_PHASE2 else EPOCHS_TUNE)
+)
+phase2_mode = "PROGRESSIVE_448" if PROGRESSIVE_RESIZE else (
+    "CONTINUE" if CONTINUE_PHASE2 else "STANDARD"
+)
+print(
+    f"[PHASE 2] mode={phase2_mode}, "
+    f"epochs={phase2_epochs}, lr={initial_lr:.1e}, output={checkpoint_path}"
+)
 
 model.compile(
     optimizer=optimizers.AdamW(learning_rate=initial_lr, weight_decay=1e-4),
@@ -574,14 +655,14 @@ callbacks_list = [
         monitor='val_kappa',
         mode='max',
         factor=0.5,
-        patience=3,
-        min_lr=1e-7,
+        patience=2 if low_lr_run else 3,
+        min_lr=2e-7 if PROGRESSIVE_RESIZE else (3e-7 if CONTINUE_PHASE2 else 1e-7),
         verbose=1
     ),
     callbacks.EarlyStopping(
         monitor='val_kappa', # Theo dõi QWK trên tập val
         mode='max',
-        patience=8,          # EarlyStopping patience
+        patience=4 if low_lr_run else 7,
         restore_best_weights=True,
         verbose=1
     ),
@@ -603,7 +684,7 @@ else:
     try:
         phase2_history = model.fit(
             train_dataset,
-            epochs=EPOCHS_TUNE,
+            epochs=phase2_epochs,
             steps_per_epoch=STEPS_PER_EPOCH,
             validation_data=val_dataset,
             callbacks=callbacks_list,
@@ -721,29 +802,36 @@ def ordinal_probs_to_classes(probs, thresholds):
 def threshold_validation_metrics(y_true, probs, thresholds):
     classes = ordinal_probs_to_classes(probs, thresholds)
     return {
+        "accuracy": float(np.mean(classes == y_true)),
         "qwk": cohen_kappa_score(y_true, classes, weights='quadratic'),
         "macro_f1": f1_score(y_true, classes, average='macro', zero_division=0),
         "balanced_accuracy": balanced_accuracy_score(y_true, classes),
     }
 
-def optimize_shared_ordinal_threshold(y_true, probs):
-    """Tune only one shared threshold to reduce validation overfitting.
+def threshold_selection_score(metrics):
+    """Điểm chọn threshold chỉ tính trên validation."""
+    if THRESHOLD_OBJECTIVE == "accuracy":
+        return metrics["accuracy"] + 0.05 * metrics["macro_f1"]
+    if THRESHOLD_OBJECTIVE == "ordinal":
+        return 0.70 * metrics["qwk"] + 0.30 * metrics["macro_f1"]
+    raise ValueError(
+        "THRESHOLD_OBJECTIVE phải là 'accuracy' hoặc 'ordinal'."
+    )
 
-    The selection score keeps the ordinal objective (QWK) dominant while also
-    preventing a high QWK from hiding a weak middle class.
-    """
+def optimize_shared_ordinal_threshold(y_true, probs):
+    """Tối ưu một shared threshold theo mục tiêu đã cấu hình."""
     candidates = []
     search_grid = np.linspace(THRESHOLD_MIN, THRESHOLD_MAX, THRESHOLD_STEPS)
     for value in search_grid:
         thresholds = np.full(NUM_CLASSES - 1, value, dtype=np.float32)
         metrics = threshold_validation_metrics(y_true, probs, thresholds)
-        selection_score = 0.70 * metrics["qwk"] + 0.30 * metrics["macro_f1"]
+        selection_score = threshold_selection_score(metrics)
         candidates.append((selection_score, metrics["qwk"], value, metrics))
 
     # Include the canonical CORAL threshold explicitly, even if grid settings change.
     default_thresholds = np.full(NUM_CLASSES - 1, 0.5, dtype=np.float32)
     default_metrics = threshold_validation_metrics(y_true, probs, default_thresholds)
-    default_score = 0.70 * default_metrics["qwk"] + 0.30 * default_metrics["macro_f1"]
+    default_score = threshold_selection_score(default_metrics)
     candidates.append((default_score, default_metrics["qwk"], 0.5, default_metrics))
 
     _, _, best_value, best_metrics = max(candidates, key=lambda item: (item[0], item[1]))
@@ -761,10 +849,7 @@ def optimize_separate_ordinal_thresholds(y_true, probs, max_passes=5):
         y_true, probs
     )
 
-    def selection_score(metrics):
-        return 0.70 * metrics["qwk"] + 0.30 * metrics["macro_f1"]
-
-    best_score = selection_score(best_metrics)
+    best_score = threshold_selection_score(best_metrics)
     search_grid = np.linspace(
         THRESHOLD_MIN,
         THRESHOLD_MAX,
@@ -793,7 +878,7 @@ def optimize_separate_ordinal_thresholds(y_true, probs, max_passes=5):
                     probs,
                     candidate_thresholds
                 )
-                score = selection_score(metrics)
+                score = threshold_selection_score(metrics)
 
                 is_better = (
                     score > boundary_best_score + 1e-8
@@ -818,6 +903,7 @@ def optimize_separate_ordinal_thresholds(y_true, probs, max_passes=5):
         print(
             f"[THRESHOLD] Pass {pass_index + 1}: "
             f"thresholds={np.round(best_thresholds, 3)}, "
+            f"Accuracy={best_metrics['accuracy']:.4f}, "
             f"QWK={best_metrics['qwk']:.4f}, "
             f"Macro F1={best_metrics['macro_f1']:.4f}"
         )
@@ -839,8 +925,8 @@ tta_preds, tta_labels = predict_with_tta(
 )
 
 # Save raw validation outputs so thresholds can be retuned without rerunning TTA.
-val_probs_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_val_ordinal_probs.npy")
-val_labels_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_val_labels.npy")
+val_probs_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_val_ordinal_probs.npy")
+val_labels_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_val_labels.npy")
 np.save(val_probs_path, tta_preds)
 np.save(val_labels_path, tta_labels)
 print(f"[THRESHOLD] Validation probabilities saved at: {val_probs_path}")
@@ -855,8 +941,9 @@ ordinal_thresholds, optimized_val_metrics = optimize_separate_ordinal_thresholds
 )
 optimized_val_kappa = optimized_val_metrics["qwk"]
 tta_classes = ordinal_probs_to_classes(tta_preds, ordinal_thresholds)
-threshold_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_ordinal_thresholds.npy")
+threshold_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_ordinal_thresholds.npy")
 np.save(threshold_path, ordinal_thresholds)
+print(f"[THRESHOLD] Selection objective: {THRESHOLD_OBJECTIVE}")
 print(f"[THRESHOLD] Default 0.5 metrics: {json.dumps(default_val_metrics, indent=2)}")
 print(f"[THRESHOLD] Best shared thresholds: {np.round(shared_thresholds, 3)}")
 print(f"[THRESHOLD] Shared metrics: {json.dumps(shared_val_metrics, indent=2)}")
@@ -939,7 +1026,7 @@ except ValueError as e:
     print(f"  [WARN] Không thể tính AUC: {e}")
 
 # --- Lưu confusion matrix ---
-cm_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_confusion_matrix.npy")
+cm_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_confusion_matrix.npy")
 np.save(cm_path, cm)
 print(f"\n[DONE] Confusion matrix lưu tại: {cm_path}")
 
@@ -963,8 +1050,8 @@ test_preds, test_labels = predict_with_tta(
 
 # Save raw test outputs for reproducible offline evaluation. Test labels are
 # never used to select thresholds.
-test_probs_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_test_ordinal_probs.npy")
-test_labels_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_test_labels.npy")
+test_probs_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_test_ordinal_probs.npy")
+test_labels_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_test_labels.npy")
 np.save(test_probs_path, test_preds)
 np.save(test_labels_path, test_labels)
 print(f"[TEST] Ordinal probabilities saved at: {test_probs_path}")
@@ -1044,7 +1131,7 @@ test_summary = {
     "per_class_recall": per_class_recall,
 }
 # Lưu confusion matrix test
-test_cm_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_test_confusion_matrix.npy")
+test_cm_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_test_confusion_matrix.npy")
 np.save(test_cm_path, test_cm)
 print(f"[DONE] Test confusion matrix saved at: {test_cm_path}")
 # Lưu toàn bộ metrics test vào pickle
@@ -1059,16 +1146,17 @@ test_metrics = {
     "test_balanced_accuracy": test_balanced_acc,
     "test_quadratic_weighted_kappa": test_kappa,
     "ordinal_thresholds": ordinal_thresholds.tolist(),
+    "threshold_objective": THRESHOLD_OBJECTIVE,
     "tta_augmentations": TTA_AUGMENTATIONS,
     "validation_default_threshold_metrics": default_val_metrics,
     "validation_optimized_threshold_metrics": optimized_val_metrics,
 }
-test_history_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_test_history.pkl")
+test_history_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_test_history.pkl")
 with open(test_history_path, 'wb') as f:
     pickle.dump(test_metrics, f)
 print(f"[DONE] Test metrics saved at: {test_history_path}")
 
-test_summary_path = os.path.join(MODELS_DIR, f"{EXPERIMENT_NAME}_test_summary.json")
+test_summary_path = os.path.join(MODELS_DIR, f"{RESULT_EXPERIMENT_NAME}_test_summary.json")
 with open(test_summary_path, 'w', encoding='utf-8') as f:
     json.dump(test_summary, f, ensure_ascii=False, indent=2)
 

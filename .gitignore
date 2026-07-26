@@ -194,3 +194,5 @@ data/processed/*
 !data/processed/**/*.gitkeep
 data/splits/*
 !data/splits/**/*.gitkeep
+
+ai/grading/tmp.py
