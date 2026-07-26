@@ -5,94 +5,10 @@ import zipfile
 import cv2
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.applications import EfficientNetB3, EfficientNetB4
-from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
 
+from ai.grading.taxonomy import CLASS_NAMES
 
-@tf.keras.utils.register_keras_serializable(package="Custom")
-class CutOutLayer(tf.keras.layers.Layer):
-    def __init__(self, mask_size_ratio=0.15, **kwargs):
-        super().__init__(**kwargs)
-        self.mask_size_ratio = mask_size_ratio
-
-    def call(self, images, training=None):
-        if not training or self.mask_size_ratio <= 0:
-            return images
-        batch_size = tf.shape(images)[0]
-        height = tf.shape(images)[1]
-        width = tf.shape(images)[2]
-        mask_height = tf.cast(tf.cast(height, tf.float32) * self.mask_size_ratio, tf.int32)
-        mask_width = tf.cast(tf.cast(width, tf.float32) * self.mask_size_ratio, tf.int32)
-        top = tf.random.uniform([batch_size, 1, 1, 1], 0, height - mask_height, dtype=tf.int32)
-        left = tf.random.uniform([batch_size, 1, 1, 1], 0, width - mask_width, dtype=tf.int32)
-        rows = tf.range(height)[tf.newaxis, :, tf.newaxis, tf.newaxis]
-        columns = tf.range(width)[tf.newaxis, tf.newaxis, :, tf.newaxis]
-        mask = ~(
-            (rows >= top)
-            & (rows < top + mask_height)
-            & (columns >= left)
-            & (columns < left + mask_width)
-        )
-        return images * tf.cast(mask, images.dtype)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"mask_size_ratio": self.mask_size_ratio})
-        return config
-
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-class PreprocessInputLayer(tf.keras.layers.Layer):
-    def __init__(self, model_name="EfficientNetB3", **kwargs):
-        super().__init__(**kwargs)
-        self.model_name = model_name
-
-    def call(self, inputs):
-        if self.model_name == "EfficientNetB3":
-            return effnet_preprocess(inputs)
-        return inputs
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"model_name": self.model_name})
-        return config
-
-
-@tf.keras.utils.register_keras_serializable(package="Custom")
-class GeMPoolingLayer(tf.keras.layers.Layer):
-    def __init__(self, p=3.0, **kwargs):
-        super().__init__(**kwargs)
-        self.p = p
-
-    def call(self, inputs):
-        inputs = tf.maximum(tf.cast(inputs, tf.float32), 1e-6)
-        return tf.pow(
-            tf.reduce_mean(tf.pow(inputs, self.p), axis=[1, 2]),
-            1.0 / self.p,
-        )
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"p": self.p})
-        return config
-
-
-CLASS_NAMES = [
-    "No DR",
-    "Mild NPDR",
-    "Moderate NPDR",
-    "Severe NPDR",
-    "Proliferative DR",
-]
-
-# Calibrated on the validation split for best_EfficientNetB3_rgb_crop_v1.keras.
-# Each value belongs to one CORAL boundary: Y>0, Y>1, Y>2, and Y>3.
-DEFAULT_ORDINAL_THRESHOLDS = np.array(
-    [0.55, 0.50, 0.435, 0.31], dtype=np.float32
-)
-
-
+# Mapping classes dựa trên thang chuẩn ICDR
 class DRModelHandler:
     def __init__(self, model_path: str, threshold_path: str | None = None):
         self.model_path = model_path

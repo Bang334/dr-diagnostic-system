@@ -21,110 +21,20 @@ Thư mục này chứa mã nguồn phục vụ việc nghiên cứu, tiền xử
 
 ---
 
-## ⬇️ Hướng Dẫn Tải Model (Dành Cho Lập Trình Viên)
+## ⬇️ Hướng Dẫn Tải Model Checkpoints (Dành Cho Lập Trình Viên)
 
-Vì giới hạn kích thước file của GitHub, các file trọng số (model `.keras`) sẽ KHÔNG được push lên repository này. Để chạy được API Grading ở máy cá nhân (Local), bạn phải làm theo 2 bước sau:
+Vì giới hạn kích thước file của GitHub, các tệp trọng số mô hình lớn (`.keras`, `.ckpt`, `.pth`) KHÔNG được push trực tiếp lên repository.
 
-1. Tải file model `best_EfficientNetB3.keras` từ liên kết lưu trữ đám mây của dự án: [Tải Model tại đây (Google Drive)](https://drive.google.com/file/d/1k9Q6FpYHM_dR78hh-C-SirOXuy60PZSq/view?usp=drive_link).
-2. Đổi tên file vừa tải thành **`dr_grading_model.keras`** và đặt nó vào đường dẫn chuẩn sau:
-   `ai/weights/dr_grading_model.keras`
+### 1. Phân loại DR Grade (dr_grading_model.keras)
+1. Tải tệp model `best_EfficientNetB3.keras` từ Google Drive dự án: [Tải Model Grading tại đây (Google Drive)](https://drive.google.com/file/d/1xaJAtbyHBJE5IRWwiv2U5ZaUnyI5wtq8/view?usp=drive_link).
+2. Đặt vào đường dẫn chuẩn: `ai/weights/dr_grading_model.keras`.
 
-Nếu chưa có file này, khi bạn khởi chạy uvicorn, API sẽ tự động tạo một file rỗng để tránh sập server nhưng sẽ báo lỗi `503 Service Unavailable` khi bạn thực hiện gọi API `/analyze`.
-
----
-
-## Chạy Và Test API Grading
-
-### 1. Chuẩn bị file model
-
-Tải model đã train tại đây:
-
-[Google Drive - dr_grading_model.keras](https://drive.google.com/file/d/1k9Q6FpYHM_dR78hh-C-SirOXuy60PZSq/view?usp=drive_link)
-
-Tai file threshold đã tối ưu tại đây:
-
-[Google Drive - dr_grading_thresholds.npy](https://drive.google.com/file/d/1JWSel04CgNV92ZbsGDfXTG33FMVCoRET/view?usp=drive_link)
-
-Sau khi tải về, đổi tên file thành:
-
-```text
-dr_grading_model.keras
-```
-
-Đặt file vào thư mục:
-
-```text
-ai/weights/dr_grading_model.keras
-```
-
-Nếu có file threshold đã tối ưu, đặt thêm vào:
-
-```text
-ai/weights/dr_grading_thresholds.npy
-```
-
-### 2. Cài đặt thư viện
-
-Chạy từ thư mục gốc của project `dr-diagnostic-system`:
-
-```bash
-pip install -r ai/grading/requirements.txt
-```
-
-Nếu project dùng file requirements khác, cài đặt các package chính sau:
-
-```bash
-pip install fastapi uvicorn python-multipart opencv-python numpy tensorflow
-```
-
-### 3. Chạy API local
-
-Chạy từ thư mục gốc của project `dr-diagnostic-system`:
-
-```bash
-uvicorn ai.grading.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Sau khi server khởi động, mở Swagger UI:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-### 4. Kiểm tra model đã load
-
-Trong Swagger, gọi endpoint:
-
-```text
-GET /model-info
-```
-
-Nếu model load thành công, response sẽ có `model_path`, `size_MB`, `model_version` và `ordinal_thresholds`.
-
-### 5. Test phân tích ảnh
-
-Trong Swagger, gọi endpoint:
-
-```text
-POST /analyze
-```
-
-Chọn file ảnh fundus, bấm `Execute`, API sẽ trả về mức độ DR dự đoán.
-
-Có thể test bằng cURL:
-
-```bash
-curl -X POST "http://127.0.0.1:8000/analyze" \
-  -H "accept: application/json" \
-  -F "file=@duong_dan_toi_anh.jpg;type=image/jpeg"
-```
-
-Nếu gặp lỗi `503 Service Unavailable`, kiểm tra lại:
-
-- File model đã nằm đúng tại `ai/weights/dr_grading_model.keras`.
-- File model không bị rỗng hoặc tải chưa xong.
-- Server uvicorn đã được tắt và chạy lại sau khi thay model.
-- Nếu dùng threshold riêng, file `dr_grading_thresholds.npy` phải khớp với model đang deploy.
+### 2. Phân đoạn tổn thương Attention U-Net (MA, HE, EX)
+1. Tải 3 tệp checkpoint `.ckpt` từ thư mục đám mây dự án: 📥 [Tải bộ Checkpoints Attention U-Net tại đây (Google Drive)](https://drive.google.com/drive/folders/1RvJSFmdrHxIxBLVQTIiECiQA5Ye817yf?usp=sharing).
+2. Đặt 3 tệp vào đường dẫn chuẩn trong Backend:
+   * `backend/checkpoints/idrid_MA/best-checkpoint-epoch=17-val_dice=0.0305.ckpt`
+   * `backend/checkpoints/idrid_HE/best-checkpoint-epoch=70-val_dice=0.0272.ckpt`
+   * `backend/checkpoints/idrid_EX/best-checkpoint-epoch=64-val_dice=0.0414.ckpt`
 
 ---
 

@@ -112,35 +112,39 @@ CREATE TABLE IF NOT EXISTS recalls (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_doctors_account ON doctors(account_id);
-CREATE INDEX idx_patients_code ON patients(patient_code);
-CREATE INDEX idx_patients_account ON patients(account_id);
-CREATE INDEX idx_screenings_patient ON screenings(patient_id);
-CREATE INDEX idx_screenings_status ON screenings(status);
-CREATE INDEX idx_screenings_created_by_account ON screenings(created_by_account_id);
-CREATE INDEX idx_screenings_doctor ON screenings(doctor_id);
-CREATE INDEX idx_ai_results_screening ON ai_results(screening_id);
-CREATE INDEX idx_segmentation_screening ON lesion_segmentation_results(screening_id);
-CREATE INDEX idx_doctor_reviews_screening ON doctor_reviews(screening_id);
-CREATE INDEX idx_doctor_reviews_reviewed_by_account ON doctor_reviews(reviewed_by_account_id);
-CREATE INDEX idx_doctor_reviews_doctor ON doctor_reviews(doctor_id);
-CREATE INDEX idx_recalls_patient ON recalls(patient_id);
-CREATE INDEX idx_recalls_date ON recalls(recall_date);
+-- 8. TẠO CÁC CHỈ MỤC TỐI ƯU TRUY VẤN (Indexes)
+CREATE INDEX IF NOT EXISTS idx_doctors_account ON doctors(account_id);
+CREATE INDEX IF NOT EXISTS idx_patients_code ON patients(patient_code);
+CREATE INDEX IF NOT EXISTS idx_patients_account ON patients(account_id);
+CREATE INDEX IF NOT EXISTS idx_screenings_patient ON screenings(patient_id);
+CREATE INDEX IF NOT EXISTS idx_screenings_status ON screenings(status);
+CREATE INDEX IF NOT EXISTS idx_screenings_created_by_account ON screenings(created_by_account_id);
+CREATE INDEX IF NOT EXISTS idx_screenings_doctor ON screenings(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_ai_results_screening ON ai_results(screening_id);
+CREATE INDEX IF NOT EXISTS idx_segmentation_screening ON lesion_segmentation_results(screening_id);
+CREATE INDEX IF NOT EXISTS idx_doctor_reviews_screening ON doctor_reviews(screening_id);
+CREATE INDEX IF NOT EXISTS idx_doctor_reviews_reviewed_by_account ON doctor_reviews(reviewed_by_account_id);
+CREATE INDEX IF NOT EXISTS idx_doctor_reviews_doctor ON doctor_reviews(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_recalls_patient ON recalls(patient_id);
+CREATE INDEX IF NOT EXISTS idx_recalls_date ON recalls(recall_date);
 
 -- Demo staff accounts. Existing demo password hashes are retained for compatibility.
 INSERT INTO accounts (username, password_hash, display_name, email, role)
 VALUES
 ('admin', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'Quản Trị Viên Hệ Thống', 'admin@hospital.gov.vn', 'admin'),
 ('dr.nguyen', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'TS. BS. Nguyễn Văn An', 'an.nv@hospital.gov.vn', 'doctor'),
-('dr.tran', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'ThS. BS. Trần Thị Bình', 'binh.tt@hospital.gov.vn', 'doctor');
+('dr.tran', '$2b$12$Kk0oA7g/Z8vNisZqB5k7sOr3h30iE.g1Gk2v/XJ4s9YqXp.1uGhy2', 'ThS. BS. Trần Thị Bình', 'binh.tt@hospital.gov.vn', 'doctor')
+ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO doctors (account_id, full_name, hospital_department, specialization)
 SELECT id, display_name, 'Khoa Nhãn Khoa', 'Nhãn khoa'
-FROM accounts WHERE username = 'dr.nguyen';
+FROM accounts WHERE username = 'dr.nguyen'
+ON CONFLICT DO NOTHING;
 
 INSERT INTO doctors (account_id, full_name, hospital_department, specialization)
 SELECT id, display_name, 'Khoa Nội Tiết', 'Nội tiết'
-FROM accounts WHERE username = 'dr.tran';
+FROM accounts WHERE username = 'dr.tran'
+ON CONFLICT DO NOTHING;
 
 -- Patient portal accounts. Initial password: benhnhan.
 INSERT INTO accounts (username, password_hash, display_name, role)
@@ -148,7 +152,8 @@ VALUES
 ('BN0001', '$2b$12$Jj00wEmRyI6hg/usjQH9X.smoFYibyT5QI60lU639K.M1J0zAIATy', 'Phạm Văn Đồng', 'patient'),
 ('BN0002', '$2b$12$Jj00wEmRyI6hg/usjQH9X.smoFYibyT5QI60lU639K.M1J0zAIATy', 'Lê Thị Mai', 'patient'),
 ('BN0003', '$2b$12$Jj00wEmRyI6hg/usjQH9X.smoFYibyT5QI60lU639K.M1J0zAIATy', 'Nguyễn Tiến Dũng', 'patient'),
-('BN0004', '$2b$12$Jj00wEmRyI6hg/usjQH9X.smoFYibyT5QI60lU639K.M1J0zAIATy', 'Hoàng Ngọc Ánh', 'patient');
+('BN0004', '$2b$12$Jj00wEmRyI6hg/usjQH9X.smoFYibyT5QI60lU639K.M1J0zAIATy', 'Hoàng Ngọc Ánh', 'patient')
+ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO patients (
     account_id,
@@ -190,4 +195,6 @@ FROM (
     diabetes_duration_years,
     latest_hba1c
 )
-JOIN accounts AS account ON account.username = seed.patient_code;
+JOIN accounts AS account ON account.username = seed.patient_code
+ON CONFLICT (patient_code) DO NOTHING;
+

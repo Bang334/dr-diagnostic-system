@@ -60,7 +60,8 @@ class ColabNotebookDownloadTests(unittest.TestCase):
         clone_source = "".join(notebook["cells"][6]["source"])
         source = "".join(notebook["cells"][12]["source"])
         train_source = "".join(notebook["cells"][16]["source"])
-        self.assertIn('feat/merged-dataset-training', clone_source)
+        self.assertIn('feat/keras-grade-semi-supervised', clone_source)
+        self.assertNotIn('feat/merged-dataset-training', clone_source)
         self.assertIn("sehastrajits/fundus-aptosddridirdeyepacsmessidor", source)
         self.assertIn('["datasets", "download"', source)
         self.assertIn("subprocess.run", source)
@@ -71,6 +72,13 @@ class ColabNotebookDownloadTests(unittest.TestCase):
         self.assertNotIn("split_names = ('train', 'validation', 'test')", source)
         self.assertIn('"--dataset-dir"', train_source)
         self.assertNotIn('"--images-dir"', train_source)
+        self.assertIn("PREPROCESSING = 'rgb_crop'", train_source)
+        self.assertIn("ARCHITECTURE = 'convnext'", train_source)
+        self.assertIn('"--preprocessing"', train_source)
+        self.assertIn("notebook_training.log", train_source)
+        self.assertIn("timestamp_utc", train_source)
+        self.assertIn("gpu_memory_gb", train_source)
+        self.assertIn("dataset_images", train_source)
 
     def test_download_cell_accepts_kaggle_val_directory(self):
         from ai.grading.train import find_predefined_splits

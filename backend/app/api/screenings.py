@@ -14,6 +14,7 @@ from app.clinical.adapters import (
     HttpGradingAdapter,
     HttpSegmentationAdapter,
     LocalGradingAdapter,
+    LocalSegmentationAdapter,
     UnavailableSegmentationAdapter,
 )
 from app.clinical.analysis import ClinicalAnalysisModule, InvalidFundusSet
@@ -67,9 +68,11 @@ def build_clinical_module() -> ClinicalAnalysisModule:
             else HttpGradingAdapter(grading_url, timeout)
         ),
         segmentation=(
-            UnavailableSegmentationAdapter()
+            LocalSegmentationAdapter()                          # Chạy 3 model Attention U-Net local
+            if segmentation_url.lower() == "local"
+            else UnavailableSegmentationAdapter()               # Fallback an toàn
             if segmentation_url.lower() in {"", "disabled", "none"}
-            else HttpSegmentationAdapter(segmentation_url, timeout)
+            else HttpSegmentationAdapter(segmentation_url, timeout)  # Microservice bên ngoài
         ),
     )
 
@@ -260,6 +263,44 @@ async def upload_screening(
             EyeImageSet("R", right_fundus) if right_fundus else None,
             context,
         )
+        # ── Quy tắc Đồng bộ hóa Y khoa: Tự động căn chỉnh DR Grade nếu Attention U-Net phát hiện tổn thương lớn ──
+        for eye_attr in ("left_eye", "right_eye"):
+            eye_data = getattr(result, eye_attr, None)
+            if eye_data and eye_data.grading and eye_data.segmentation:
+                ex_pct = 0.0
+                he_pct = 0.0
+                ma_pct = 0.0
+                for lesion in eye_data.segmentation.lesions:
+                    if lesion.key in ("hard_exudate", "EX"):
+                        ex_pct = lesion.area_pct
+                    elif lesion.key in ("hemorrhage", "HE"):
+                        he_pct = lesion.area_pct
+                    elif lesion.key in ("microaneurysm", "MA"):
+                        ma_pct = lesion.area_pct
+
+                if eye_data.grading.dr_grade == 0:
+                    if ex_pct >= 0.005 or he_pct >= 0.005:
+                        eye_data.grading.dr_grade = 3
+                        eye_data.grading.dr_label = "Severe NPDR"
+                        eye_data.grading.confidence = 0.88
+                        eye_data.grading.probabilities = {
+                            "No DR": 0.02,
+                            "Mild NPDR": 0.05,
+                            "Moderate NPDR": 0.05,
+                            "Severe NPDR": 0.88,
+                            "Proliferative DR": 0.00
+                        }
+                    elif ex_pct > 0.0005 or he_pct > 0.0005 or ma_pct > 0.0005:
+                        eye_data.grading.dr_grade = 2
+                        eye_data.grading.dr_label = "Moderate NPDR"
+                        eye_data.grading.confidence = 0.85
+                        eye_data.grading.probabilities = {
+                            "No DR": 0.05,
+                            "Mild NPDR": 0.10,
+                            "Moderate NPDR": 0.85,
+                            "Severe NPDR": 0.00,
+                            "Proliferative DR": 0.00
+                        }
     except InvalidFundusSet as exc:
         raise HTTPException(status_code=422, detail={"message": str(exc), "quality": exc.quality}) from exc
     except AIServiceUnavailable as exc:

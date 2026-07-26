@@ -12,13 +12,12 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from ai.preprocessing.fundus_prep import preprocess_rgb_crop_512_from_bgr
-from ai.grading.model_handler import DRModelHandler
+from ai.grading.predictor import load_predictor
 
 app = FastAPI(
     title="Diabetic Retinopathy Grading API (Thành viên 1)",
-    description="API chạy mô hình EfficientNet phân loại cấp độ DR.",
-    version="1.0"
+    description="API phân loại 5 mức DR theo ICDR/ETDRS bằng Keras hoặc PyTorch.",
+    version="2.0"
 )
 
 # Cấu hình CORS để Frontend/Backend khác có thể gọi được
@@ -56,10 +55,11 @@ async def startup_event():
         print(f"[!] Chưa có file model tại {MODEL_PATH}")
         print("[!] Bạn hãy copy file model thật của bạn đè lên đường dẫn này nhé.")
 
-    dr_model = DRModelHandler(
-        model_path=MODEL_PATH,
-        threshold_path=THRESHOLD_PATH,
-    )
+    try:
+        dr_model = load_predictor(MODEL_PATH)
+    except (FileNotFoundError, ValueError, RuntimeError) as error:
+        dr_model = None
+        print(f"[!] Could not load grading model: {error}")
 
 @app.get("/")
 def root():
@@ -84,7 +84,9 @@ def get_model_info():
         ),
         "last_modified": last_modified,
         "size_MB": size_mb,
-        "model_version": dr_model.model_version if dr_model else "Unknown"
+        "model_version": dr_model.model_version if dr_model else "Unknown",
+        "supported_grades": 5,
+        "classification_standard": "ICDR with ETDRS correspondence",
     }
 
 @app.post("/analyze")
@@ -92,10 +94,10 @@ async def analyze_fundus(file: UploadFile = File(...)):
     """
     Endpoint chính nhận file ảnh võng mạc, tiền xử lý và trả về cấp độ DR.
     """
-    if dr_model is None or dr_model.model is None:
+    if dr_model is None:
         raise HTTPException(
             status_code=503, 
-            detail="Model chưa được load. Vui lòng kiểm tra lại file dr_grading_model.keras trong thư mục ai/weights."
+            detail="Model chưa được load. Kiểm tra DR_MODEL_PATH (.keras/.h5/.pth/.pt)."
         )
 
     # 1. Kiểm tra định dạng ảnh
@@ -115,11 +117,12 @@ async def analyze_fundus(file: UploadFile = File(...)):
         if img is None:
             raise HTTPException(status_code=400, detail="Không thể đọc hoặc xử lý ảnh. Ảnh có thể bị hỏng.")
 
-        # Match the colour-preserving rgb_crop_512 training dataset.
-        preprocessed_img = preprocess_rgb_crop_512_from_bgr(img)
+        # The same colour-preserving crop/resize is used by ai/grading/train.py.
+        prediction = dr_model.predict(img)
+        preprocessed_img = prediction.preprocessed_bgr
 
         # 4. Dự đoán qua Model (Inference)
-        result = dr_model.predict(preprocessed_img)
+        result = prediction.to_api_dict()
         
         # 5. (Tùy chọn) Mã hóa ảnh đã tiền xử lý thành Base64 để Backend xem trước
         preview_bgr = cv2.cvtColor(preprocessed_img, cv2.COLOR_RGB2BGR)

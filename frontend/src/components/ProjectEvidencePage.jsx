@@ -37,6 +37,13 @@ const CLINICAL_SOURCES = [
     tag: 'ICDR',
   },
   {
+    title: 'IDRiD Dataset & Attention U-Net Lesion Segmentation',
+    publisher: 'IEEE Transactions / Medical Image Analysis',
+    description: 'Cơ sở khoa học phân đoạn vi phình mạch (MA), xuất huyết (HE) và tiết cứng (EX) định lượng tỷ lệ % diện tích.',
+    href: 'https://idrid.grand-challenge.org/',
+    tag: 'Lesion AI',
+  },
+  {
     title: 'Standards of Care in Diabetes — 2026',
     publisher: 'American Diabetes Association',
     description: 'Cơ sở tham khảo về sàng lọc võng mạc, quản lý yếu tố nguy cơ và chuyển chuyên khoa.',
@@ -159,9 +166,9 @@ const EVIDENCE_STATUS = [
     text: 'Đã có inference cục bộ, lưu version/confidence/probabilities và bước bác sĩ duyệt.',
   },
   {
-    status: 'partial',
-    title: 'Phân đoạn tổn thương',
-    text: 'Interface và bảng lưu đã có, nhưng cấu hình mặc định của backend hiện là disabled/not-configured.',
+    status: 'implemented',
+    title: 'Phân đoạn tổn thương (Lesion Segmentation)',
+    text: 'Đã tích hợp hoàn chỉnh 3 mô hình Attention U-Net (MA, HE, EX) nạp cục bộ, tính % diện tích tổn thương và vẽ đè bản đồ Mask.',
   },
   {
     status: 'implemented',
