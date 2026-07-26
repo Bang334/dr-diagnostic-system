@@ -12,13 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from ai.semi_supervised.few_shot_demo import (
-    FixedSupportEpisodeSampler,
-    RetfoundProtoNet,
-    parse_args as parse_few_shot_args,
-    select_fixed_support,
-)
-from ai.semi_supervised.research_utils import (
+from ai.train_semi_v2.runtime import (
     assert_unlabeled_is_external,
     load_grading_checkpoint,
     load_split_frames,
@@ -26,13 +20,16 @@ from ai.semi_supervised.research_utils import (
     prepare_fresh_output_dir,
     save_classifier_checkpoint,
 )
-from ai.semi_supervised.semi_supervised_training import (
+from ai.train_semi_v2.train import (
+    cap_pseudo_grade_zero,
     generate_pseudo_labels,
     limit_labeled_replay,
     limit_unlabeled_paths,
     parse_args as parse_semi_args,
+    parse_grade_thresholds,
     prepare_output_dir,
     resume_training_state,
+    train_one_epoch,
     trim_history_for_resume,
     validate_args as validate_semi_args,
 )
@@ -53,15 +50,132 @@ class ArgumentDefaultTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.threshold, 0.95)
+        self.assertIsNone(args.grade_thresholds)
         self.assertEqual(args.pseudo_weight, 0.25)
+        self.assertEqual(args.batch_size, 4)
+        self.assertEqual(args.accum_steps, 4)
         self.assertEqual(args.head_lr, 1e-5)
         self.assertEqual(args.backbone_lr, 1e-6)
         self.assertEqual(args.patience, 3)
         self.assertEqual(args.max_unlabeled_images, 0)
         self.assertEqual(args.max_labeled_per_class, 0)
         self.assertEqual(args.max_pseudo_per_class, 0)
+        self.assertEqual(args.max_pseudo_grade_zero, 500)
         self.assertIsNone(args.resume)
         self.assertFalse(args.eval_only)
+
+    def test_resolves_threshold_for_each_grade(self):
+        args = parse_semi_args(
+            [
+                "--checkpoint",
+                "best.pth",
+                "--dataset-dir",
+                "dataset",
+                "--unlabeled-dir",
+                "unlabeled",
+                "--output-dir",
+                "output",
+                "--grade-thresholds",
+                "0.99,0.90,0.95,0.90,0.93",
+            ]
+        )
+        validate_semi_args(args)
+        self.assertEqual(
+            args.grade_thresholds,
+            (0.99, 0.90, 0.95, 0.90, 0.93),
+        )
+
+    def test_rejects_invalid_grade_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "Expected five"):
+            parse_grade_thresholds("0.9,0.9", fallback=0.95)
+        with self.assertRaisesRegex(ValueError, "between 0.5 and 1.0"):
+            parse_grade_thresholds("0.9,0.9,0.4,0.9,0.9", fallback=0.95)
+
+
+class _WeightedBatchDataset(Dataset):
+    def __init__(self, sample_weight):
+        self.sample_weight = sample_weight
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, index):
+        return (
+            torch.tensor([1.0, 0.0]),
+            torch.tensor(index % 2),
+            str(index),
+            torch.tensor(self.sample_weight),
+        )
+
+
+class _NoOpScaler:
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        pass
+
+    def step(self, optimizer):
+        optimizer.step()
+
+    def update(self):
+        pass
+
+
+class SampleWeightTests(unittest.TestCase):
+    @staticmethod
+    def _train_loss(sample_weight):
+        torch.manual_seed(0)
+        model = nn.Linear(2, 5)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        loader = DataLoader(
+            _WeightedBatchDataset(sample_weight),
+            batch_size=2,
+            shuffle=False,
+        )
+        return train_one_epoch(
+            model,
+            loader,
+            optimizer,
+            _NoOpScaler(),
+            torch.device("cpu"),
+            accum_steps=1,
+            amp_enabled=False,
+            epoch_number=1,
+        )
+
+    def test_pseudo_weight_scales_an_all_pseudo_batch(self):
+        full_weight_loss = self._train_loss(1.0)
+        pseudo_weight_loss = self._train_loss(0.25)
+
+        self.assertAlmostEqual(
+            pseudo_weight_loss,
+            0.25 * full_weight_loss,
+            places=6,
+        )
+
+
+class PseudoLabelSelectionTests(unittest.TestCase):
+    def test_caps_only_grade_zero_and_keeps_highest_confidence(self):
+        frame = pd.DataFrame(
+            {
+                "image_path": ["zero-low", "one", "zero-high", "two", "zero-mid"],
+                "pseudo_label": [0, 1, 0, 2, 0],
+                "confidence": [0.95, 0.96, 0.99, 0.97, 0.98],
+            }
+        )
+
+        selected = cap_pseudo_grade_zero(frame, max_grade_zero=2)
+
+        self.assertEqual(
+            selected["pseudo_label"].value_counts().sort_index().to_dict(),
+            {0: 2, 1: 1, 2: 1},
+        )
+        self.assertEqual(
+            set(selected.loc[selected["pseudo_label"] == 0, "image_path"]),
+            {"zero-high", "zero-mid"},
+        )
+        self.assertEqual(len(frame), 5)
 
     def test_eval_only_requires_resume_checkpoint(self):
         args = parse_semi_args(
@@ -79,24 +193,6 @@ class ArgumentDefaultTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "requires --resume"):
             validate_semi_args(args)
-
-    def test_few_shot_defaults_only_unfreeze_last_block(self):
-        args = parse_few_shot_args(
-            [
-                "--checkpoint",
-                "best.pth",
-                "--target-dataset-dir",
-                "dataset",
-                "--output-dir",
-                "output",
-            ]
-        )
-        self.assertEqual(args.shots, 5)
-        self.assertEqual(args.queries, 1)
-        self.assertEqual(args.embedding_dim, 0)
-        self.assertEqual(args.unfreeze_last_blocks, 1)
-        self.assertEqual(args.encoder_lr, 1e-6)
-
 
 class CheckpointLoadingTests(unittest.TestCase):
     def test_reconstructs_model_from_saved_args_without_pretrained_download(self):
@@ -117,7 +213,7 @@ class CheckpointLoadingTests(unittest.TestCase):
             )
             reconstructed = nn.Linear(2, 5)
             with patch(
-                "ai.semi_supervised.research_utils.timm.create_model",
+                "ai.train_semi_v2.runtime.timm.create_model",
                 return_value=reconstructed,
             ) as create_model:
                 bundle = load_grading_checkpoint(
@@ -127,10 +223,38 @@ class CheckpointLoadingTests(unittest.TestCase):
         create_model.assert_called_once_with(
             "toy_model", pretrained=False, num_classes=5
         )
+        self.assertEqual(bundle.saved_args.preprocessing, "rgb_crop")
         for expected, actual in zip(
             original_model.parameters(), bundle.model.parameters()
         ):
             torch.testing.assert_close(expected, actual)
+
+    def test_infers_ben_graham_for_legacy_enhanced_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            checkpoint_path = Path(temporary_dir) / "checkpoint-best.pth"
+            original_model = nn.Linear(2, 5)
+            torch.save(
+                {
+                    "model": original_model.state_dict(),
+                    "args": {
+                        "loss": "ce",
+                        "model_source": "timm",
+                        "model_name": "toy_model",
+                        "image_size": 224,
+                        "enhance": True,
+                    },
+                },
+                checkpoint_path,
+            )
+            with patch(
+                "ai.train_semi_v2.runtime.timm.create_model",
+                return_value=nn.Linear(2, 5),
+            ):
+                bundle = load_grading_checkpoint(
+                    checkpoint_path, torch.device("cpu"), require_ce=True
+                )
+
+        self.assertEqual(bundle.saved_args.preprocessing, "ben_graham")
 
 
 class DataSeparationTests(unittest.TestCase):
@@ -191,9 +315,18 @@ class DataSeparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             output = Path(temporary_dir) / "run"
             output.mkdir()
-            checkpoint = output / "checkpoint-last.pth"
+            checkpoint = output / "last.pth"
             checkpoint.write_bytes(b"checkpoint")
             prepared = prepare_output_dir(output, checkpoint)
+        self.assertEqual(prepared, output.resolve())
+
+    def test_fresh_command_can_continue_pretraining_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output = Path(temporary_dir) / "run"
+            output.mkdir()
+            (output / "scan.csv").write_text("image_path\n", encoding="utf-8")
+            (output / "train.log").write_text("interrupted", encoding="utf-8")
+            prepared = prepare_output_dir(output, None)
         self.assertEqual(prepared, output.resolve())
 
 
@@ -289,7 +422,7 @@ class ResumeTests(unittest.TestCase):
                     return {"scale": 128.0}
 
             path = Path(temporary_dir) / "checkpoint-last.pth"
-            save_classifier_checkpoint(
+            checkpoint_size = save_classifier_checkpoint(
                 path,
                 model,
                 {"loss": "ce"},
@@ -303,6 +436,8 @@ class ResumeTests(unittest.TestCase):
                 scaler=_Scaler(),
             )
             state = torch.load(path, map_location="cpu", weights_only=False)
+            self.assertEqual(checkpoint_size, path.stat().st_size)
+            self.assertFalse(path.with_suffix(path.suffix + ".tmp").exists())
         self.assertEqual(state["best_epoch"], 1)
         self.assertEqual(state["stale_epochs"], 1)
         self.assertEqual(state["scaler"], {"scale": 128.0})
@@ -363,66 +498,6 @@ class DeepDRiDPreparationTests(unittest.TestCase):
             self.assertEqual(sorted(frame["diagnosis"].tolist()), list(range(5)))
 
 
-class FixedSupportTests(unittest.TestCase):
-    def test_selects_exactly_k_images_per_class_once(self):
-        frame = pd.DataFrame(
-            {
-                "image_path": [f"{grade}_{index}.jpg" for grade in range(5) for index in range(10)],
-                "diagnosis": [grade for grade in range(5) for _ in range(10)],
-            }
-        )
-        first = select_fixed_support(frame, shots=2, seed=42)
-        second = select_fixed_support(frame, shots=2, seed=42)
-        self.assertEqual(len(first), 10)
-        self.assertEqual(first["diagnosis"].value_counts().sort_index().tolist(), [2] * 5)
-        self.assertEqual(first["image_path"].tolist(), second["image_path"].tolist())
-
-    def test_episode_only_reuses_fixed_support_and_has_disjoint_query(self):
-        fixed = pd.DataFrame(
-            {"diagnosis": [grade for grade in range(5) for _ in range(5)]}
-        )
-        sampler = FixedSupportEpisodeSampler(fixed, seed=42)
-        support, support_labels, query, query_labels = sampler.sample(1)
-        self.assertEqual(len(support), 20)
-        self.assertEqual(len(query), 5)
-        self.assertTrue(set(support).isdisjoint(query))
-        self.assertEqual([support_labels.count(grade) for grade in range(5)], [4] * 5)
-        self.assertEqual([query_labels.count(grade) for grade in range(5)], [1] * 5)
-        self.assertTrue(set(support + query).issubset(set(fixed.index)))
-
-    def test_rejects_class_with_too_few_images(self):
-        frame = pd.DataFrame(
-            {"diagnosis": [grade for grade in range(5) for _ in range(2)]}
-        )
-        with self.assertRaisesRegex(ValueError, "needs at least"):
-            select_fixed_support(frame, shots=3, seed=1)
-
-
-class _ToyEncoder(nn.Module):
-    num_features = 4
-
-    def forward_features(self, images):
-        return images.mean(dim=(2, 3))[:, :4]
-
-    def forward_head(self, features, pre_logits=False):
-        return features
-
-
-class ProtoNetTests(unittest.TestCase):
-    def test_returns_one_logit_per_support_class(self):
-        model = RetfoundProtoNet(
-            _ToyEncoder(), embedding_dim=3, temperature=0.1, forward_batch_size=2
-        )
-        support_images = torch.randn(10, 4, 2, 2)
-        support_labels = torch.tensor([grade for grade in range(5) for _ in range(2)])
-        query_images = torch.randn(5, 4, 2, 2)
-        logits, class_ids = model.episode_logits(
-            support_images, support_labels, query_images
-        )
-        self.assertEqual(tuple(logits.shape), (5, 5))
-        self.assertEqual(class_ids.tolist(), list(range(5)))
-
-
 class _PseudoDataset(Dataset):
     def __init__(self, root):
         self.root = root
@@ -444,6 +519,30 @@ class _ConfidenceModel(nn.Module):
 
 
 class PseudoLabelTests(unittest.TestCase):
+    def test_applies_threshold_for_the_predicted_grade(self):
+        class PerGradeConfidenceModel(nn.Module):
+            def forward(self, images):
+                logits = torch.zeros(images.size(0), 5, device=images.device)
+                first = images[:, 0, 0, 0] > 0.5
+                logits[first, 0] = 2.2
+                logits[~first, 1] = 2.2
+                return logits
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                frame = generate_pseudo_labels(
+                    PerGradeConfidenceModel(),
+                    loader,
+                    torch.device("cpu"),
+                    grade_thresholds=(0.80, 0.60, 0.95, 0.95, 0.95),
+                    max_per_class=0,
+                    amp_enabled=False,
+                )
+
+        self.assertEqual(len(frame), 1)
+        self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 1)
+
     def test_keeps_only_predictions_above_threshold(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             loader = DataLoader(_PseudoDataset(Path(temporary_dir)), batch_size=2)
@@ -453,7 +552,7 @@ class PseudoLabelTests(unittest.TestCase):
                     _ConfidenceModel(),
                     loader,
                     torch.device("cpu"),
-                    threshold=0.95,
+                    grade_thresholds=(0.95, 0.95, 0.95, 0.95, 0.95),
                     max_per_class=0,
                     amp_enabled=False,
                 )
@@ -461,6 +560,43 @@ class PseudoLabelTests(unittest.TestCase):
         self.assertEqual(int(frame.iloc[0]["pseudo_label"]), 2)
         self.assertGreater(float(frame.iloc[0]["confidence"]), 0.95)
         self.assertIn("Pseudo-label progress: image 1/2", output.getvalue())
+
+    def test_resumes_partial_prediction_without_reprocessing_saved_images(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            first_path = str((root / "0.jpg").resolve())
+            progress_path = root / "progress.csv"
+            pd.DataFrame(
+                [{
+                    "image_path": first_path,
+                    "pseudo_label": 2,
+                    "confidence": 0.99,
+                    "accepted": True,
+                }]
+            ).to_csv(progress_path, index=False)
+
+            class CountingModel(_ConfidenceModel):
+                seen = 0
+
+                def forward(self, images):
+                    self.seen += images.size(0)
+                    return super().forward(images)
+
+            model = CountingModel()
+            loader = DataLoader(_PseudoDataset(root), batch_size=2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                frame = generate_pseudo_labels(
+                    model,
+                    loader,
+                    torch.device("cpu"),
+                    grade_thresholds=(0.95, 0.95, 0.95, 0.95, 0.95),
+                    max_per_class=0,
+                    amp_enabled=False,
+                    progress_path=progress_path,
+                )
+
+        self.assertEqual(model.seen, 1)
+        self.assertEqual(len(frame), 1)
 
 
 if __name__ == "__main__":

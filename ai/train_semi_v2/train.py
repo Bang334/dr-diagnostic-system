@@ -1,4 +1,4 @@
-"""Continue a RETFound grading checkpoint with confidence-filtered pseudo-labels.
+"""Train semi-supervised v2 from a canonical grading checkpoint.
 
 Only the fixed training split and an external unlabeled image directory are
 used for optimization. The validation split selects checkpoints. The test
@@ -16,7 +16,7 @@ from pathlib import Path
 import random
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 import torch
@@ -34,7 +34,7 @@ from ai.grading.train import (
     is_head_parameter,
     save_evaluation_artifacts,
 )
-from ai.semi_supervised.research_utils import (
+from ai.train_semi_v2.runtime import (
     PseudoLabeledFundusDataset,
     UnlabeledFundusDataset,
     WeightedLabeledDataset,
@@ -47,11 +47,27 @@ from ai.semi_supervised.research_utils import (
     save_classifier_checkpoint,
     seed_everything,
 )
+from ai.train_semi_v2.pseudo_cache import PseudoLabelCache, PseudoLabelCacheSpec
+
+
+_LOG_PATH: Optional[Path] = None
+
+
+def configure_log_file(path: Optional[Path]) -> None:
+    """Mirror structured progress messages to a durable UTF-8 log."""
+    global _LOG_PATH
+    _LOG_PATH = path
+    if _LOG_PATH is not None:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def log(message: str) -> None:
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
+    line = f"[{timestamp}] {message}"
+    print(line, flush=True)
+    if _LOG_PATH is not None:
+        with _LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 def format_duration(seconds: float) -> str:
@@ -103,6 +119,25 @@ def limit_labeled_replay(
     )
 
 
+def cap_pseudo_grade_zero(
+    frame: pd.DataFrame, *, max_grade_zero: int
+) -> pd.DataFrame:
+    """Keep the most confident grade-0 predictions without limiting grades 1..4."""
+    if max_grade_zero == 0 or frame.empty:
+        return frame.reset_index(drop=True).copy()
+    grade_zero = (
+        frame.loc[frame["pseudo_label"] == 0]
+        .sort_values("confidence", ascending=False)
+        .head(max_grade_zero)
+    )
+    diseased = frame.loc[frame["pseudo_label"] != 0]
+    return (
+        pd.concat([grade_zero, diseased], ignore_index=True)
+        .sort_values(["pseudo_label", "confidence"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+
 def limit_unlabeled_paths(
     paths: List[Path], *, max_images: int, seed: int
 ) -> List[Path]:
@@ -118,6 +153,20 @@ def prepare_output_dir(output_dir: Path, resume: Optional[Path]) -> Path:
     """Allow a non-empty run directory only for a checkpoint inside that run."""
     output_dir = output_dir.expanduser().resolve()
     if resume is None:
+        restartable = {
+            "train.log",
+            "replay.csv",
+            "scan.csv",
+            "cache.json",
+            "pseudo.csv",
+            "baseline.json",
+            "best.pth",
+            "history.jsonl",
+        }
+        if output_dir.is_dir():
+            existing = {path.name for path in output_dir.iterdir()}
+            if existing and existing.issubset(restartable):
+                return output_dir
         return prepare_fresh_output_dir(output_dir)
     resume = resume.expanduser().resolve()
     if not resume.is_file():
@@ -188,15 +237,33 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="External directory containing genuinely unlabeled fundus images",
     )
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--pseudo-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Persistent pseudo-label cache shared by runs. Matching teacher, "
+            "unlabeled manifest, preprocessing and threshold skip inference."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=6)
     parser.add_argument("--patience", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--accum-steps", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--accum-steps", type=int, default=4)
     parser.add_argument("--head-lr", type=float, default=1e-5)
     parser.add_argument("--backbone-lr", type=float, default=1e-6)
     parser.add_argument("--min-lr", type=float, default=1e-7)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--threshold", type=float, default=0.95)
+    parser.add_argument(
+        "--grade-thresholds",
+        type=str,
+        default=None,
+        help=(
+            "Five comma-separated confidence thresholds for predicted grades "
+            "0,1,2,3,4. When omitted, --threshold is used for every grade."
+        ),
+    )
     parser.add_argument("--pseudo-weight", type=float, default=0.25)
     parser.add_argument(
         "--max-unlabeled-images",
@@ -216,6 +283,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=0,
         help="Keep the most confident N images per class; use 0 for no cap",
     )
+    parser.add_argument(
+        "--max-pseudo-grade-zero",
+        type=int,
+        default=500,
+        help=(
+            "After loading or generating predictions, keep only the most confident "
+            "N grade-0 pseudo-labels while retaining every grade 1..4; use 0 for all"
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -231,12 +307,40 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--enhance", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.pseudo_cache_dir is None:
+        args.pseudo_cache_dir = args.output_dir.parent / "cache"
+    return args
+
+
+def parse_grade_thresholds(
+    raw: Optional[str | Sequence[float]],
+    *,
+    fallback: float,
+) -> tuple[float, ...]:
+    if raw is None:
+        values = [float(fallback)] * 5
+    elif isinstance(raw, str):
+        values = [float(value.strip()) for value in raw.split(",") if value.strip()]
+    else:
+        values = [float(value) for value in raw]
+    if len(values) != 5:
+        raise ValueError(
+            "Expected five comma-separated thresholds for grades 0,1,2,3,4; "
+            f"received {values}"
+        )
+    if any(value < 0.5 or value > 1.0 for value in values):
+        raise ValueError("Every grade threshold must be between 0.5 and 1.0")
+    return tuple(values)
 
 
 def validate_args(args: argparse.Namespace) -> None:
     if not 0.5 <= args.threshold <= 1.0:
         raise ValueError("--threshold must be between 0.5 and 1.0")
+    args.grade_thresholds = parse_grade_thresholds(
+        args.grade_thresholds,
+        fallback=args.threshold,
+    )
     if not 0.0 < args.pseudo_weight <= 1.0:
         raise ValueError("--pseudo-weight must be in (0, 1]")
     if args.epochs < 1 or args.patience < 1:
@@ -245,13 +349,15 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--batch-size and --accum-steps must be positive")
     if args.max_pseudo_per_class < 0:
         raise ValueError("--max-pseudo-per-class cannot be negative")
+    if args.max_pseudo_grade_zero < 0:
+        raise ValueError("--max-pseudo-grade-zero cannot be negative")
     if args.max_unlabeled_images < 0:
         raise ValueError("--max-unlabeled-images cannot be negative")
     if args.max_labeled_per_class < 0:
         raise ValueError("--max-labeled-per-class cannot be negative")
     if args.eval_only and args.resume is None:
         raise ValueError("--eval-only requires --resume CHECKPOINT")
-    output_checkpoint = (args.output_dir / "checkpoint-best.pth").resolve()
+    output_checkpoint = (args.output_dir / "best.pth").resolve()
     if output_checkpoint == args.checkpoint.expanduser().resolve():
         raise ValueError(
             "--output-dir would overwrite the parent checkpoint; choose a new run directory"
@@ -280,14 +386,31 @@ def generate_pseudo_labels(
     loader: DataLoader,
     device: torch.device,
     *,
-    threshold: float,
+    grade_thresholds: Sequence[float],
     max_per_class: int,
     amp_enabled: bool,
+    progress_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     model.eval()
-    records: List[Dict[str, Any]] = []
+    thresholds = parse_grade_thresholds(
+        grade_thresholds,
+        fallback=float(grade_thresholds[0]),
+    )
+    progress_columns = ["image_path", "pseudo_label", "confidence", "accepted"]
+    progress_records: List[Dict[str, Any]] = []
+    if progress_path is not None and progress_path.is_file():
+        saved_progress = pd.read_csv(progress_path, on_bad_lines="skip")
+        if set(progress_columns).issubset(saved_progress.columns):
+            saved_progress = saved_progress.drop_duplicates("image_path", keep="last")
+            progress_records = saved_progress[progress_columns].to_dict("records")
+            log(f"Resuming pseudo-label inference: already processed={len(progress_records):,}.")
+    processed_paths = {str(record["image_path"]) for record in progress_records}
+    accepted_count = sum(
+        str(record["accepted"]).strip().lower() == "true"
+        for record in progress_records
+    )
     total_images = len(loader.dataset)
-    processed_images = 0
+    processed_images = len(processed_paths)
     started_at = time.perf_counter()
     progress = tqdm(
         total=total_images,
@@ -298,39 +421,73 @@ def generate_pseudo_labels(
         file=sys.stdout,
         leave=True,
     )
+    progress.update(min(processed_images, total_images))
     try:
         for images, paths in loader:
-            images = images.to(device, non_blocking=True)
+            resolved_paths = [os.fspath(Path(path).resolve()) for path in paths]
+            pending_indices = [
+                index for index, path in enumerate(resolved_paths)
+                if path not in processed_paths
+            ]
+            if not pending_indices:
+                continue
+            images = images[pending_indices].to(device, non_blocking=True)
             with torch.amp.autocast("cuda", enabled=amp_enabled):
                 probabilities = torch.softmax(model(images), dim=1)
             confidence, labels = probabilities.max(dim=1)
-            for path, label, score in zip(paths, labels.cpu(), confidence.cpu()):
-                if float(score) >= threshold:
-                    records.append(
-                        {
-                            "image_path": os.fspath(Path(path).resolve()),
-                            "pseudo_label": int(label),
-                            "confidence": float(score),
-                        }
-                    )
+            batch_records = []
+            pending_paths = [resolved_paths[index] for index in pending_indices]
+            for path, label, score in zip(
+                pending_paths, labels.cpu(), confidence.cpu()
+            ):
+                predicted_grade = int(label)
+                accepted = float(score) >= thresholds[predicted_grade]
+                batch_records.append(
+                    {
+                        "image_path": path,
+                        "pseudo_label": predicted_grade,
+                        "confidence": float(score),
+                        "accepted": accepted,
+                    }
+                )
+                processed_paths.add(path)
                 processed_images += 1
+                accepted_count += int(accepted)
                 progress.update(1)
-                progress.set_postfix(accepted=len(records), refresh=False)
+                progress.set_postfix(accepted=accepted_count, refresh=False)
                 if should_log_progress(processed_images, total_images):
                     elapsed = format_duration(time.perf_counter() - started_at)
                     percent = 100.0 * processed_images / max(total_images, 1)
                     log(
                         "Pseudo-label progress: "
                         f"image {processed_images}/{total_images} ({percent:.1f}%), "
-                        f"accepted_so_far={len(records):,}, elapsed={elapsed}, "
+                        f"accepted_so_far={accepted_count:,}, elapsed={elapsed}, "
                         f"{gpu_memory_summary()}"
                     )
+            progress_records.extend(batch_records)
+            if progress_path is not None:
+                pd.DataFrame(batch_records, columns=progress_columns).to_csv(
+                    progress_path,
+                    mode="a",
+                    header=not progress_path.exists(),
+                    index=False,
+                )
     finally:
         progress.close()
 
-    frame = pd.DataFrame.from_records(
-        records, columns=["image_path", "pseudo_label", "confidence"]
+    all_predictions = pd.DataFrame.from_records(
+        progress_records, columns=progress_columns
+    ).drop_duplicates("image_path", keep="last")
+    accepted_values = all_predictions["accepted"]
+    accepted_mask = (
+        accepted_values
+        if accepted_values.dtype == bool
+        else accepted_values.astype(str).str.lower().eq("true")
     )
+    frame = all_predictions.loc[
+        accepted_mask,
+        ["image_path", "pseudo_label", "confidence"],
+    ].copy()
     if frame.empty:
         return frame
     frame = frame.sort_values("confidence", ascending=False)
@@ -369,7 +526,7 @@ def train_one_epoch(
     model.train()
     optimizer.zero_grad(set_to_none=True)
     total_weighted_loss = 0.0
-    total_weight = 0.0
+    total_samples = 0
     total_batches = len(loader)
     started_at = time.perf_counter()
     for step, (images, labels, _, sample_weights) in enumerate(
@@ -386,7 +543,7 @@ def train_one_epoch(
                 reduction="none",
                 label_smoothing=0.05,
             )
-            loss = (per_sample * sample_weights).sum() / sample_weights.sum().clamp_min(1e-8)
+            loss = (per_sample * sample_weights).mean()
         scaler.scale(loss / accum_steps).backward()
         should_step = (step + 1) % accum_steps == 0 or step + 1 == len(loader)
         if should_step:
@@ -396,11 +553,11 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
         total_weighted_loss += float((per_sample.detach() * sample_weights).sum())
-        total_weight += float(sample_weights.sum())
+        total_samples += int(per_sample.numel())
         batch_number = step + 1
         if should_log_progress(batch_number, total_batches, updates=20):
             elapsed = format_duration(time.perf_counter() - started_at)
-            average_loss = total_weighted_loss / max(total_weight, 1e-8)
+            average_loss = total_weighted_loss / max(total_samples, 1)
             log(
                 f"Epoch {epoch_number} train: batch {batch_number}/{total_batches} "
                 f"({100.0 * batch_number / max(total_batches, 1):.1f}%), "
@@ -409,7 +566,7 @@ def train_one_epoch(
                 f"{optimizer.param_groups[-1]['lr']:.2e}, elapsed={elapsed}, "
                 f"{gpu_memory_summary()}"
             )
-    return total_weighted_loss / max(total_weight, 1e-8)
+    return total_weighted_loss / max(total_samples, 1)
 
 
 def evaluate_held_out_test(
@@ -474,9 +631,10 @@ def evaluate_held_out_test(
 
 def run(args: argparse.Namespace) -> None:
     run_started_at = time.perf_counter()
-    log("[1/7] Validating arguments and preparing run directory...")
     validate_args(args)
     args.output_dir = prepare_output_dir(args.output_dir, args.resume)
+    configure_log_file(args.output_dir / "train.log")
+    log("[1/7] Arguments validated and run directory prepared.")
     seed_everything(args.seed)
 
     log("[2/7] Checking CUDA availability...")
@@ -515,10 +673,11 @@ def run(args: argparse.Namespace) -> None:
 
     train_transform, eval_transform = build_transforms(image_size)
     data_args = _dataset_args(saved_args, args)
-    replay_manifest_path = args.output_dir / "labeled_replay_manifest.csv"
-    unlabeled_manifest_path = args.output_dir / "unlabeled_scan_manifest.csv"
-    pseudo_path = args.output_dir / "pseudo_labels.csv"
-    baseline_path = args.output_dir / "baseline_metrics.json"
+    replay_manifest_path = args.output_dir / "replay.csv"
+    unlabeled_manifest_path = args.output_dir / "scan.csv"
+    pseudo_path = args.output_dir / "pseudo.csv"
+    pseudo_cache_record_path = args.output_dir / "cache.json"
+    baseline_path = args.output_dir / "baseline.json"
 
     if resume_state is not None:
         if not pseudo_path.is_file():
@@ -529,6 +688,16 @@ def run(args: argparse.Namespace) -> None:
         saved_run_args = resume_state.get("args", {}).get(
             "semi_supervised_args", {}
         )
+        saved_grade_thresholds = parse_grade_thresholds(
+            saved_run_args.get("grade_thresholds"),
+            fallback=float(saved_run_args.get("threshold", args.threshold)),
+        )
+        if tuple(args.grade_thresholds) != saved_grade_thresholds:
+            raise ValueError(
+                "Cannot change grade thresholds while resuming because pseudo.csv "
+                f"was created with {list(saved_grade_thresholds)}, but the current "
+                f"command uses {list(args.grade_thresholds)}. Start a new RUN_NAME."
+            )
         if replay_manifest_path.is_file():
             replay_frame = pd.read_csv(replay_manifest_path)
         else:
@@ -648,22 +817,82 @@ def run(args: argparse.Namespace) -> None:
     if resume_state is None:
         pseudo_started_at = time.perf_counter()
         log(
-            f"[5/7] Generating pseudo-labels: threshold={args.threshold}, "
+            f"[5/7] Generating pseudo-labels: "
+            f"grade_thresholds={list(args.grade_thresholds)}, "
             f"max_per_class={args.max_pseudo_per_class}, "
             f"images={selected_unlabeled_count:,}."
         )
-        pseudo_frame = generate_pseudo_labels(
-            model,
-            unlabeled_loader,
-            device,
-            threshold=args.threshold,
-            max_per_class=args.max_pseudo_per_class,
-            amp_enabled=amp_enabled,
+        cache = (
+            PseudoLabelCache(args.pseudo_cache_dir)
+            if args.pseudo_cache_dir is not None
+            else None
         )
+
+        def predict_pseudo_labels() -> pd.DataFrame:
+            return generate_pseudo_labels(
+                model,
+                unlabeled_loader,
+                device,
+                grade_thresholds=args.grade_thresholds,
+                max_per_class=args.max_pseudo_per_class,
+                amp_enabled=amp_enabled,
+                progress_path=cache.progress_path if cache is not None else None,
+            )
+
+        if cache is not None:
+            preprocessing = str(getattr(saved_args, "preprocessing", "rgb_crop"))
+            cache_result = cache.load_or_generate(
+                PseudoLabelCacheSpec(
+                    grade_thresholds=tuple(args.grade_thresholds),
+                    teacher_checkpoint=args.checkpoint,
+                    unlabeled_paths=tuple(unlabeled_paths),
+                    preprocessing=preprocessing,
+                    image_size=image_size,
+                    max_pseudo_per_class=args.max_pseudo_per_class,
+                    enhance=args.enhance,
+                ),
+                predict_pseudo_labels,
+            )
+            pseudo_frame = cache_result.frame
+            pseudo_cache_record_path.write_text(
+                json.dumps(
+                    {
+                        "cache_key": cache_result.cache_key,
+                        "reused": cache_result.reused,
+                        "csv_path": os.fspath(cache_result.csv_path),
+                        "metadata_path": os.fspath(cache_result.metadata_path),
+                        "grade_thresholds": list(args.grade_thresholds),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            action = "reused" if cache_result.reused else "created"
+            log(
+                f"Pseudo-label cache {action}: key={cache_result.cache_key[:20]}, "
+                f"path={cache_result.csv_path}."
+            )
+        else:
+            pseudo_frame = predict_pseudo_labels()
+        unfiltered_counts = (
+            pseudo_frame["pseudo_label"].value_counts().sort_index().to_dict()
+        )
+        pseudo_frame = cap_pseudo_grade_zero(
+            pseudo_frame, max_grade_zero=args.max_pseudo_grade_zero
+        )
+        if args.max_pseudo_grade_zero > 0:
+            log(
+                "Applied post-cache grade-0 cap without repeating inference: "
+                f"max_grade_zero={args.max_pseudo_grade_zero}, "
+                f"before={unfiltered_counts}, "
+                f"after={pseudo_frame['pseudo_label'].value_counts().sort_index().to_dict()}."
+            )
         if pseudo_frame.empty:
             raise RuntimeError(
-                "No pseudo-label passed the confidence threshold; lower --threshold "
-                "only after inspecting model calibration and the unlabeled domain"
+                "No pseudo-label passed the confidence thresholds; lower the "
+                "relevant grade threshold only after inspecting "
+                "model calibration and the unlabeled domain"
             )
         pseudo_frame.to_csv(pseudo_path, index=False)
         log(
@@ -732,17 +961,23 @@ def run(args: argparse.Namespace) -> None:
         metadata = {
             "research_method": "pseudo_labeling",
             "parent_checkpoint": os.fspath(args.checkpoint.resolve()),
-            "pseudo_threshold": args.threshold,
+            "pseudo_thresholds": list(args.grade_thresholds),
             "pseudo_weight": args.pseudo_weight,
             "unlabeled_dir": os.fspath(args.unlabeled_dir.resolve()),
             "semi_supervised_args": {
-                key: os.fspath(value) if isinstance(value, Path) else value
+                key: (
+                    os.fspath(value)
+                    if isinstance(value, Path)
+                    else list(value)
+                    if isinstance(value, tuple)
+                    else value
+                )
                 for key, value in vars(args).items()
             },
         }
         checkpoint_args = checkpoint_args_with_metadata(saved_args, metadata)
         save_classifier_checkpoint(
-            args.output_dir / "checkpoint-best.pth",
+            args.output_dir / "best.pth",
             model,
             checkpoint_args,
             epoch=-1,
@@ -871,7 +1106,7 @@ def run(args: argparse.Namespace) -> None:
             best_qwk = current_qwk
             best_epoch = epoch
             stale_epochs = 0
-            best_path = args.output_dir / "checkpoint-best.pth"
+            best_path = args.output_dir / "best.pth"
             log(f"QWK improved to {best_qwk:.6f}; saving {best_path}...")
             save_classifier_checkpoint(
                 best_path,
@@ -890,10 +1125,10 @@ def run(args: argparse.Namespace) -> None:
                 f"patience={stale_epochs}/{args.patience}."
             )
         scheduler.step()
-        last_path = args.output_dir / "checkpoint-last.pth"
+        last_path = args.output_dir / "last.pth"
         checkpoint_started_at = time.perf_counter()
         log(f"Saving resumable state to {last_path}...")
-        save_classifier_checkpoint(
+        checkpoint_size = save_classifier_checkpoint(
             last_path,
             model,
             checkpoint_args,
@@ -906,10 +1141,15 @@ def run(args: argparse.Namespace) -> None:
             scheduler=scheduler,
             scaler=scaler,
         )
+        checkpoint_size_message = (
+            f"{checkpoint_size / 1024**3:.2f} GiB"
+            if checkpoint_size is not None
+            else "size unavailable"
+        )
         log(
             f"Resume checkpoint saved in "
             f"{format_duration(time.perf_counter() - checkpoint_started_at)} "
-            f"({last_path.stat().st_size / 1024**3:.2f} GiB)."
+            f"({checkpoint_size_message})."
         )
         if stale_epochs >= args.patience:
             log(f"Early stopping after {stale_epochs} epochs without QWK improvement.")
@@ -938,13 +1178,20 @@ def run(args: argparse.Namespace) -> None:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
     log(
         f"Training run finished in {format_duration(time.perf_counter() - run_started_at)}. "
-        f"Run --eval-only with checkpoint-best.pth for the final held-out test."
+        f"Run --eval-only with best.pth for the final held-out test."
     )
     log("Summary:\n" + json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
-    run(parse_args())
+    try:
+        run(parse_args())
+    except KeyboardInterrupt:
+        log(
+            "Training interrupted by user. last.pth from the most "
+            "recent fully completed epoch remains safe; use --resume to continue."
+        )
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

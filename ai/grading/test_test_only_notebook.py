@@ -26,6 +26,16 @@ class TestOnlyNotebookTests(unittest.TestCase):
         self.assertIn("/content/drive/MyDrive/test.zip", self.source)
         self.assertIn("/content/drive/MyDrive/checkpoint-best.pth", self.source)
         self.assertIn("ai.grading.evaluate_test", self.source)
+        self.assertIn("feat/keras-grade-semi-supervised", self.source)
+        self.assertNotIn("feat/brset-semi-patient-split", self.source)
+        self.assertIn("notebook_test.log", self.source)
+        self.assertIn("grading_contract", self.source)
+        self.assertIn("dataset_audit", self.source)
+        self.assertIn("class_counts", self.source)
+        self.assertIn("evaluation_start", self.source)
+        self.assertIn("evaluation_end", self.source)
+        self.assertIn("timestamp_utc", self.source)
+        self.assertIn("predicted_grade_distribution", self.source)
         self.assertNotIn("KAGGLE_DATASET", self.source)
 
     def test_contains_no_training_or_resume_command(self):

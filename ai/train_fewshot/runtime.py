@@ -1,4 +1,4 @@
-"""Shared utilities for RETFound semi-supervised and few-shot experiments.
+"""Runtime utilities owned by the grading-connected few-shot module.
 
 The helpers in this module deliberately load only an existing grading
 checkpoint. They never download a new backbone and never include the held-out
@@ -211,7 +211,10 @@ def prepare_deepdrid_target(source_root: Path, output_dir: Path) -> Path:
             try:
                 os.link(source, destination)
             except OSError:
-                destination.symlink_to(source)
+                try:
+                    destination.symlink_to(source)
+                except OSError:
+                    shutil.copyfile(source, destination)
 
     official_splits = {
         "train": ("regular-fundus-training", "regular-fundus-training.csv"),

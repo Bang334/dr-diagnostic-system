@@ -2,15 +2,9 @@ import os
 import numpy as np
 import tensorflow as tf
 
-# Mapping classes dựa trên thang chuẩn ICDR
-CLASS_NAMES = [
-    "No DR",
-    "Mild NPDR",
-    "Moderate NPDR",
-    "Severe NPDR",
-    "Proliferative DR"
-]
+from ai.grading.taxonomy import CLASS_NAMES
 
+# Mapping classes dựa trên thang chuẩn ICDR
 class DRModelHandler:
     def __init__(self, model_path: str):
         """
@@ -30,22 +24,16 @@ class DRModelHandler:
             return
             
         print(f"[*] Đang load model từ {self.model_path}...")
-        
-        # Cách 1: Load trực tiếp bằng tf.keras.models.load_model
         try:
-            self.model = tf.keras.models.load_model(self.model_path, compile=False)
-            print("[v] Load Keras model bằng load_model() thành công!")
-            return
-        except Exception as e1:
-            print(f"[!] tf.keras.models.load_model() thất bại ({e1}). Thử nạp bằng khung kiến trúc...")
-
-        # Cách 2: Dựng lại khung kiến trúc EfficientNetB3 và load_weights
-        try:
+            # KHẮC PHỤC LỖI KHÁC VERSION KERAS (quantization_config):
+            # Tự build lại ĐÚNG y hệt kiến trúc model thay vì dùng load_model để tránh lỗi parse config.
             from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
             from tensorflow.keras import layers, models
             from tensorflow.keras.applications import EfficientNetB3
             
             data_augmentation = models.Sequential([
+                # Kept for checkpoint compatibility. These layers are disabled
+                # automatically during model.predict().
                 layers.RandomFlip("horizontal"),
                 layers.RandomRotation(0.05),
                 layers.RandomZoom((-0.1, 0.1)),
@@ -55,6 +43,8 @@ class DRModelHandler:
             x = data_augmentation(inputs)
             x = layers.Lambda(effnet_preprocess, name="preprocess_input")(x)
             
+            # In inference the complete trained checkpoint is loaded below, so
+            # downloading ImageNet weights here would be redundant.
             base_model = EfficientNetB3(weights=None, include_top=False, input_shape=(300, 300, 3))
             x = base_model(x, training=False)
 
@@ -70,10 +60,12 @@ class DRModelHandler:
 
             outputs = layers.Dense(5, activation='softmax', dtype='float32', name="predictions")(x)
             self.model = models.Model(inputs, outputs)
+            
+            # Load trọng số vào khung kiến trúc đã dựng chuẩn
             self.model.load_weights(self.model_path)
-            print("[v] Load weights thành công!")
-        except Exception as e2:
-            print(f"[x] Lỗi khi nạp mô hình Keras: {e2}")
+            print("[v] Load model thành công!")
+        except Exception as e:
+            print(f"[x] Lỗi khi load model: {e}")
             
     def predict(self, preprocessed_img: np.ndarray):
         """
