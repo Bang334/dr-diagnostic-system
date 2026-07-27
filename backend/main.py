@@ -94,7 +94,7 @@ async def startup_prewarm_ai_models():
             from app.services.dr_inference import get_dr_inference_service
             from app.services.lesion_inference import get_lesion_inference_service
             logger.info("⚡ Đang nạp trước (Pre-warming) các checkpoint AI vào bộ nhớ RAM/VRAM...")
-            get_dr_inference_service().load()
+            get_dr_inference_service(settings.DR_DEFAULT_MODEL).load()
             get_lesion_inference_service().load()
             logger.info("✅ Nạp thành công toàn bộ mô hình AI. Hệ thống đã sẵn sàng xử lý siêu tốc!")
         except Exception as err:

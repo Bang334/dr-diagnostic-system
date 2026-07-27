@@ -7,6 +7,14 @@ from app.api.screenings import _require_screening_detail_access, _screening_eye_
 
 
 class ScreeningDetailContractTests(unittest.TestCase):
+    def test_openapi_exposes_model_selection_for_screening_upload(self):
+        spec = app.openapi()
+        self.assertIn("/api/v1/screenings/models", spec["paths"])
+        upload = spec["paths"]["/api/v1/screenings/upload"]["post"]
+        body_ref = upload["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+        body_schema = spec["components"]["schemas"][body_ref.rsplit("/", 1)[-1]]
+        self.assertIn("grading_model", body_schema["properties"])
+
     def test_openapi_exposes_screening_detail_with_ai_and_doctor_results(self):
         spec = app.openapi()
         path = spec["paths"].get("/api/v1/screenings/{screening_id}")

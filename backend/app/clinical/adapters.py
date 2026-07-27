@@ -16,15 +16,22 @@ class AIServiceUnavailable(RuntimeError):
 class LocalGradingAdapter:
     """Run the bundled RETFound checkpoint without a second HTTP service."""
 
+    def __init__(self, model_key: str = "grading"):
+        self.model_key = model_key
+
     async def predict(self, image_bytes: bytes, eye: str) -> GradingResult:
-        from app.services.dr_inference import DRInferenceError, get_dr_inference_service
+        from app.services.dr_inference import (
+            DRInferenceError,
+            predict_with_dr_model,
+        )
 
         loop = asyncio.get_running_loop()
         try:
             data = await loop.run_in_executor(
                 None,
-                get_dr_inference_service().predict,
+                predict_with_dr_model,
                 image_bytes,
+                self.model_key,
             )
         except DRInferenceError as exc:
             raise AIServiceUnavailable(f"Local grading model failed: {exc}") from exc
@@ -93,9 +100,15 @@ class LocalSegmentationAdapter:
 
 
 class HttpGradingAdapter:
-    def __init__(self, base_url: str, timeout_seconds: float = 120.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 120.0,
+        model_key: str = "grading",
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.model_key = model_key
 
     async def predict(self, image_bytes: bytes, eye: str) -> GradingResult:
         if not self.base_url:
@@ -105,7 +118,7 @@ class HttpGradingAdapter:
                 response = await client.post(
                     f"{self.base_url}/analyze",
                     files={"file": (f"fundus-{eye}.png", BytesIO(image_bytes), "image/png")},
-                    data={"eye": eye},
+                    data={"eye": eye, "grading_model": self.model_key},
                 )
                 response.raise_for_status()
                 data = response.json()

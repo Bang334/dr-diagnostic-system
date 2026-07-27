@@ -172,8 +172,9 @@ dist-ssr/
 # PostgreSQL data (if running locally/docker without volume mapping outside)
 pgdata/
 
-# AI Models & Large Files (Weights)
-ai/weights/
+# AI Models & Large Files (Weights) — tất cả model tập trung tại ai/weights/
+ai/weights/grading/
+ai/weights/segmentation/
 *.keras
 *.h5
 *.pth
@@ -195,4 +196,38 @@ data/processed/*
 data/splits/*
 !data/splits/**/*.gitkeep
 
-ai/grading/tmp.py
+# ── AI Model Checkpoints (large .ckpt files in subfolders) ──
+backend/checkpoints/
+
+# ── Uploaded user images (runtime-generated, not source code) ──
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ── Node modules accidentally placed in Python backend ──
+backend/node_modules/
+
+# ── Backup virtual environments ──
+backend/.venv-py38-backup/
+backend/venv/
+
+# ── Temporary / debug scripts at project root ──
+patch_keras.py
+test_weights.py
+
+# ── AI Model Checkpoints (large .ckpt files in subfolders) ──
+backend/checkpoints/
+
+# ── Uploaded user images (runtime-generated, not source code) ──
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ── Node modules accidentally placed in Python backend ──
+backend/node_modules/
+
+# ── Backup virtual environments ──
+backend/.venv-py38-backup/
+backend/venv/
+
+# ── Temporary / debug scripts at project root ──
+patch_keras.py
+test_weights.py

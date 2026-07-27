@@ -5,6 +5,8 @@ from pathlib import Path
 from app.services.dr_inference import (
     DRInferenceService,
     InvalidFundusImage,
+    InvalidModelSelection,
+    normalize_model_key,
 )
 
 
@@ -13,6 +15,12 @@ CHECKPOINT_PATH = BACKEND_DIR / "checkpoint-best.pth"
 
 
 class DRInferenceContractTests(unittest.TestCase):
+    def test_model_selection_accepts_only_allowlisted_models(self):
+        self.assertEqual(normalize_model_key("checkpoint-best.pth"), "grading")
+        self.assertEqual(normalize_model_key("best-fewshot.pth"), "fewshot")
+        with self.assertRaises(InvalidModelSelection):
+            normalize_model_key("../../untrusted.pth")
+
     def test_invalid_image_is_rejected_before_model_loading(self):
         service = DRInferenceService(CHECKPOINT_PATH)
 
@@ -46,6 +54,24 @@ class DRInferenceContractTests(unittest.TestCase):
         info = service.model_info()
         self.assertTrue(info["loaded"])
         self.assertEqual(info["architecture"], "vit_large_patch14_dinov2.lvd142m")
+        self.assertEqual(info["image_size"], 224)
+        self.assertEqual(info["classes"], 5)
+
+    @unittest.skipUnless(
+        os.getenv("RUN_DR_MODEL_TEST") == "1",
+        "Set RUN_DR_MODEL_TEST=1 to load the 1.3 GB few-shot checkpoint.",
+    )
+    def test_real_fewshot_checkpoint_loads_as_protonet(self):
+        service = DRInferenceService(
+            BACKEND_DIR / "best-fewshot.pth",
+            model_key="fewshot",
+            device="cpu",
+        )
+        service.load()
+
+        info = service.model_info()
+        self.assertTrue(info["loaded"])
+        self.assertEqual(info["checkpoint_kind"], "fewshot_protonet")
         self.assertEqual(info["image_size"], 224)
         self.assertEqual(info["classes"], 5)
 

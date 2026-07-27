@@ -44,6 +44,11 @@ from app.services.image_storage import (
     ImageStorageError,
     StoredImage,
 )
+from app.services.dr_inference import (
+    InvalidModelSelection,
+    available_dr_models,
+    normalize_model_key,
+)
 
 
 router = APIRouter(prefix="/screenings", tags=["Screenings"])
@@ -57,15 +62,15 @@ DR_LABELS = {
 }
 
 
-def build_clinical_module() -> ClinicalAnalysisModule:
+def build_clinical_module(grading_model: str = "grading") -> ClinicalAnalysisModule:
     timeout = settings.AI_REQUEST_TIMEOUT_SECONDS
     grading_url = settings.AI_GRADING_SERVICE_URL.strip()
     segmentation_url = settings.AI_SEGMENTATION_SERVICE_URL.strip()
     return ClinicalAnalysisModule(
         grading=(
-            LocalGradingAdapter()
+            LocalGradingAdapter(grading_model)
             if grading_url.lower() in {"", "local"}
-            else HttpGradingAdapter(grading_url, timeout)
+            else HttpGradingAdapter(grading_url, timeout, grading_model)
         ),
         segmentation=(
             LocalSegmentationAdapter()                          # Chạy 3 model Attention U-Net local
@@ -75,6 +80,13 @@ def build_clinical_module() -> ClinicalAnalysisModule:
             else HttpSegmentationAdapter(segmentation_url, timeout)  # Microservice bên ngoài
         ),
     )
+
+
+@router.get("/models")
+def get_screening_models(
+    current_account: Account = Depends(require_staff),
+):
+    return available_dr_models()
 
 
 def _validate_content_type(file: UploadFile) -> None:
@@ -225,11 +237,17 @@ def _require_screening_detail_access(
 @router.post("/upload", response_model=ScreeningUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_screening(
     patient_id: int = Form(...),
+    grading_model: str = Form("grading"),
     left_fundus_image: Optional[UploadFile] = File(None),
     right_fundus_image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_account: Account = Depends(require_staff),
 ):
+    try:
+        grading_model = normalize_model_key(grading_model)
+    except InvalidModelSelection as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Không tìm thấy bệnh nhân.")
@@ -258,7 +276,7 @@ async def upload_screening(
     )
 
     try:
-        result = await build_clinical_module().analyze(
+        result = await build_clinical_module(grading_model).analyze(
             EyeImageSet("L", left_fundus) if left_fundus else None,
             EyeImageSet("R", right_fundus) if right_fundus else None,
             context,

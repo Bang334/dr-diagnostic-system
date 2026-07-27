@@ -3001,6 +3001,98 @@ code {
 .document-group-card li { min-width: 0; }
 .document-group-card code { display: block; overflow: hidden; padding: 5px 7px; border-radius: 6px; color: var(--text-secondary); background: var(--surface); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 
+.grading-model-selector {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--border-light));
+  background: linear-gradient(135deg, var(--surface), var(--primary-soft));
+}
+
+.grading-model-selector-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.grading-model-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  color: var(--primary);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.grading-model-selector label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.grading-model-selector p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.grading-model-control {
+  display: flex;
+  flex: 0 1 430px;
+  align-items: center;
+  gap: 10px;
+}
+
+.grading-model-control select {
+  min-width: 260px;
+  min-height: 44px;
+  padding: 0 38px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-primary);
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.grading-model-control select:focus-visible {
+  border-color: var(--primary);
+  outline: 3px solid color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+.grading-model-control select:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.model-readiness {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.model-readiness.is-ready {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, var(--surface));
+}
+
+.model-readiness.is-missing {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+}
+
 @media (max-width: 1180px) {
   .evidence-source-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .governance-pipeline { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -3008,6 +3100,19 @@ code {
 }
 
 @media (max-width: 880px) {
+  .grading-model-selector,
+  .grading-model-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .grading-model-control {
+    flex-basis: auto;
+    width: 100%;
+  }
+  .grading-model-control select {
+    width: 100%;
+    min-width: 0;
+  }
   .governance-hero { grid-template-columns: 1fr; padding: 26px; }
   .governance-boundary-grid, .legal-checklist-card ul, .governance-data-cards, .evidence-status-grid, .document-group-grid { grid-template-columns: 1fr; }
   .governance-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
