@@ -213,3 +213,21 @@ backend/venv/
 # ── Temporary / debug scripts at project root ──
 patch_keras.py
 test_weights.py
+
+# ── AI Model Checkpoints (large .ckpt files in subfolders) ──
+backend/checkpoints/
+
+# ── Uploaded user images (runtime-generated, not source code) ──
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ── Node modules accidentally placed in Python backend ──
+backend/node_modules/
+
+# ── Backup virtual environments ──
+backend/.venv-py38-backup/
+backend/venv/
+
+# ── Temporary / debug scripts at project root ──
+patch_keras.py
+test_weights.py

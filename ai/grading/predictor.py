@@ -88,8 +88,14 @@ class TorchPredictor:
     def __init__(self, path: Path):
         import torch
         import timm
+        import pathlib
 
-        state = torch.load(path, map_location="cpu", weights_only=False)
+        posix_path = pathlib.PosixPath
+        pathlib.PosixPath = pathlib.WindowsPath
+        try:
+            state = torch.load(path, map_location="cpu", weights_only=False)
+        finally:
+            pathlib.PosixPath = posix_path
         saved = state.get("args", {})
         if saved.get("loss", "ce") != "ce":
             raise ValueError("Production inference currently requires a five-class CE checkpoint")
@@ -106,6 +112,8 @@ class TorchPredictor:
             kwargs["img_size"] = image_size
         self.model = timm.create_model(model_name, **kwargs)
         self.model.load_state_dict(state["model"])
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.model.eval()
         self.torch = torch
         contract_spec = state.get("grading_contract", {}).get("preprocessing")
@@ -119,11 +127,11 @@ class TorchPredictor:
     def predict(self, image_bgr: np.ndarray) -> Prediction:
         processed = preprocess_fundus(image_bgr, self.preprocessing)
         rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        tensor = self.torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0)
-        mean = self.torch.tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1)
-        std = self.torch.tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1)
+        tensor = self.torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0).to(self.device)
+        mean = self.torch.tensor((0.485, 0.456, 0.406), device=self.device).view(1, 3, 1, 1)
+        std = self.torch.tensor((0.229, 0.224, 0.225), device=self.device).view(1, 3, 1, 1)
         with self.torch.inference_mode():
-            probabilities = self.torch.softmax(self.model((tensor - mean) / std), dim=1)[0].numpy()
+            probabilities = self.torch.softmax(self.model((tensor - mean) / std), dim=1)[0].cpu().numpy()
         normalized = _normalize_probabilities(probabilities)
         return Prediction(
             grade=int(np.argmax(normalized)),

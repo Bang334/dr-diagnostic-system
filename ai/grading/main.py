@@ -32,7 +32,10 @@ app.add_middleware(
 WEIGHTS_DIR = os.path.join(project_root, "ai", "weights")
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
 MODEL_PATH = os.environ.get(
-    "DR_MODEL_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_model.keras")
+    "DR_MODEL_PATH", os.path.join(WEIGHTS_DIR, "best.pth")
+)
+THRESHOLD_PATH = os.environ.get(
+    "DR_THRESHOLD_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_thresholds.npy")
 )
 
 # Khởi tạo thư mục tạm để lưu ảnh upload
@@ -72,9 +75,17 @@ def get_model_info():
     import datetime
     last_modified = datetime.datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
     size_mb = round(file_stat.st_size / (1024 * 1024), 2)
+    thresholds = getattr(dr_model, "thresholds", None)
+    handler = getattr(dr_model, "handler", None)
+    if thresholds is None and handler is not None:
+        thresholds = getattr(handler, "thresholds", None)
     
     return {
         "model_path": MODEL_PATH,
+        "threshold_path": THRESHOLD_PATH,
+        "ordinal_thresholds": (
+            thresholds.tolist() if thresholds is not None else None
+        ),
         "last_modified": last_modified,
         "size_MB": size_mb,
         "model_version": dr_model.model_version if dr_model else "Unknown",
@@ -118,7 +129,8 @@ async def analyze_fundus(file: UploadFile = File(...)):
         result = prediction.to_api_dict()
         
         # 5. (Tùy chọn) Mã hóa ảnh đã tiền xử lý thành Base64 để Backend xem trước
-        _, buffer = cv2.imencode('.png', preprocessed_img)
+        preview_bgr = cv2.cvtColor(preprocessed_img, cv2.COLOR_RGB2BGR)
+        _, buffer = cv2.imencode('.png', preview_bgr)
         b64_string = base64.b64encode(buffer).decode('utf-8')
         result["preprocessed_preview_b64"] = f"data:image/png;base64,{b64_string}"
         
