@@ -16,7 +16,7 @@ Tài liệu mô tả chi tiết luồng xử lý hoàn chỉnh từ giai đoạn
                                                        - Model phân loại tối ưu
                                                        - Model phân đoạn tối ưu
                                                        - Quy tắc lâm sàng (Clinical Rules)
-                                                       - Công thức phân tầng nguy cơ
+                                                       - Mức ưu tiên rà soát và cờ an toàn
 ```
 
 ---
@@ -70,7 +70,7 @@ flowchart TD
         
         ORCH --> CONF_CHECK{6b. Confidence >= 70%?}
         CONF_CHECK -->|Không| WARN[Ghi nhận cảnh báo Low Confidence]
-        CONF_CHECK -->|Có| RISK[6c. Tính điểm nguy cơ y tế 0-100<br>kết hợp: Grade, Tổn thương, HbA1c, Huyết áp, Năm ĐTĐ]
+        CONF_CHECK -->|Có| RISK[6c. Xác định review_priority<br>từ Grade và cờ an toàn; không tính risk score y khoa]
         WARN --> RISK
 
         RISK --> RULES[6d. Áp Luật Chuyển Tuyến ICO Table 3b<br>Tự động đề xuất thời hạn tái khám]
@@ -124,7 +124,9 @@ Bác sĩ nhãn khoa tải lên ảnh võng mạc của bệnh nhân và nhập c
 - **Số năm bị đái tháo đường:** Thời gian mắc bệnh càng lâu, nguy cơ xuất hiện biến chứng võng mạc càng cao.
 
 ### Bước 2: Quality Gate & Tiền Xử Lý Ảnh
-- Thu đủ hai ảnh mỗi mắt: đĩa thị và hậu cực/hoàng điểm.
+- Quy trình mục tiêu thu hai ảnh mỗi mắt: đĩa thị và hậu cực/hoàng điểm. API
+  prototype hiện chỉ tiếp nhận một ảnh fundus cho mỗi mắt; đây là khoảng trống
+  phải hoàn thiện trước triển khai theo quy trình mục tiêu.
 - Hệ thống loại ảnh hỏng/quá nhỏ, xóa metadata khi tái mã hóa và gắn trạng thái
   `ReviewRequired`; người đọc xác nhận gradability. Tiền xử lý cụ thể thuộc model
   và phải giống quy trình đã validation, không mặc định CLAHE làm ảnh đạt chuẩn.

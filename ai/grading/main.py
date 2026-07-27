@@ -12,13 +12,12 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 
-from ai.preprocessing.fundus_prep import preprocess_fundus_image
-from ai.grading.model_handler import DRModelHandler
+from ai.grading.predictor import load_predictor
 
 app = FastAPI(
     title="Diabetic Retinopathy Grading API (Thành viên 1)",
-    description="API chạy mô hình EfficientNet-B3 phân loại cấp độ DR.",
-    version="1.0"
+    description="API phân loại 5 mức DR theo ICDR/ETDRS bằng Keras hoặc PyTorch.",
+    version="2.0"
 )
 
 # Cấu hình CORS để Frontend/Backend khác có thể gọi được
@@ -32,7 +31,12 @@ app.add_middleware(
 # Khởi tạo thư mục chứa model trọng số
 WEIGHTS_DIR = os.path.join(project_root, "ai", "weights")
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
-MODEL_PATH = os.path.join(WEIGHTS_DIR, "dr_grading_model.keras")
+MODEL_PATH = os.environ.get(
+    "DR_MODEL_PATH", os.path.join(WEIGHTS_DIR, "best.pth")
+)
+THRESHOLD_PATH = os.environ.get(
+    "DR_THRESHOLD_PATH", os.path.join(WEIGHTS_DIR, "dr_grading_thresholds.npy")
+)
 
 # Khởi tạo thư mục tạm để lưu ảnh upload
 TEMP_DIR = os.path.join(project_root, "ai", "grading", "temp_uploads")
@@ -47,14 +51,15 @@ async def startup_event():
     global dr_model
     print("=== ĐANG KHỞI ĐỘNG DR GRADING API ===")
     
-    # Tạo sẵn file h5 rỗng nếu chưa có để tránh lỗi sập server (người dùng sẽ thay file thật sau)
     if not os.path.exists(MODEL_PATH):
         print(f"[!] Chưa có file model tại {MODEL_PATH}")
         print("[!] Bạn hãy copy file model thật của bạn đè lên đường dẫn này nhé.")
-        open(MODEL_PATH, 'a').close() 
 
-    # Khởi tạo Model Handler (chưa load thật nếu file rỗng, nhưng giữ cấu trúc chạy)
-    dr_model = DRModelHandler(model_path=MODEL_PATH)
+    try:
+        dr_model = load_predictor(MODEL_PATH)
+    except (FileNotFoundError, ValueError, RuntimeError) as error:
+        dr_model = None
+        print(f"[!] Could not load grading model: {error}")
 
 @app.get("/")
 def root():
@@ -70,12 +75,22 @@ def get_model_info():
     import datetime
     last_modified = datetime.datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
     size_mb = round(file_stat.st_size / (1024 * 1024), 2)
+    thresholds = getattr(dr_model, "thresholds", None)
+    handler = getattr(dr_model, "handler", None)
+    if thresholds is None and handler is not None:
+        thresholds = getattr(handler, "thresholds", None)
     
     return {
         "model_path": MODEL_PATH,
+        "threshold_path": THRESHOLD_PATH,
+        "ordinal_thresholds": (
+            thresholds.tolist() if thresholds is not None else None
+        ),
         "last_modified": last_modified,
         "size_MB": size_mb,
-        "model_version": dr_model.model_version if dr_model else "Unknown"
+        "model_version": dr_model.model_version if dr_model else "Unknown",
+        "supported_grades": 5,
+        "classification_standard": "ICDR with ETDRS correspondence",
     }
 
 @app.post("/analyze")
@@ -83,10 +98,10 @@ async def analyze_fundus(file: UploadFile = File(...)):
     """
     Endpoint chính nhận file ảnh võng mạc, tiền xử lý và trả về cấp độ DR.
     """
-    if dr_model is None or dr_model.model is None:
+    if dr_model is None:
         raise HTTPException(
             status_code=503, 
-            detail="Model chưa được load. Vui lòng kiểm tra lại file dr_grading_model.keras trong thư mục ai/weights."
+            detail="Model chưa được load. Kiểm tra DR_MODEL_PATH (.keras/.h5/.pth/.pt)."
         )
 
     # 1. Kiểm tra định dạng ảnh
@@ -102,23 +117,27 @@ async def analyze_fundus(file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(content)
             
-        # SỬ DỤNG OPENCV ĐỌC ẢNH GỐC CHO KHỚP VỚI LÚC TRAIN (KHÔNG DÙNG BEN GRAHAM)
         img = cv2.imread(temp_path)
         if img is None:
             raise HTTPException(status_code=400, detail="Không thể đọc hoặc xử lý ảnh. Ảnh có thể bị hỏng.")
-            
-        preprocessed_img = img # Giữ nguyên ảnh gốc
+
+        # The same colour-preserving crop/resize is used by ai/grading/train.py.
+        prediction = dr_model.predict(img)
+        preprocessed_img = prediction.preprocessed_bgr
 
         # 4. Dự đoán qua Model (Inference)
-        result = dr_model.predict(preprocessed_img)
+        result = prediction.to_api_dict()
         
         # 5. (Tùy chọn) Mã hóa ảnh đã tiền xử lý thành Base64 để Backend xem trước
-        _, buffer = cv2.imencode('.png', preprocessed_img)
+        preview_bgr = cv2.cvtColor(preprocessed_img, cv2.COLOR_RGB2BGR)
+        _, buffer = cv2.imencode('.png', preview_bgr)
         b64_string = base64.b64encode(buffer).decode('utf-8')
         result["preprocessed_preview_b64"] = f"data:image/png;base64,{b64_string}"
         
         return JSONResponse(content=result)
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi hệ thống trong quá trình phân tích: {str(e)}")
         

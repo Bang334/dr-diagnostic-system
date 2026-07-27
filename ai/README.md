@@ -21,15 +21,20 @@ Thư mục này chứa mã nguồn phục vụ việc nghiên cứu, tiền xử
 
 ---
 
-## ⬇️ Hướng Dẫn Tải Model (Dành Cho Lập Trình Viên)
+## ⬇️ Hướng Dẫn Tải Model Checkpoints (Dành Cho Lập Trình Viên)
 
-Vì giới hạn kích thước file của GitHub, các file trọng số (model `.keras`) sẽ KHÔNG được push lên repository này. Để chạy được API Grading ở máy cá nhân (Local), bạn phải làm theo 2 bước sau:
+Vì giới hạn kích thước file của GitHub, các tệp trọng số mô hình lớn (`.keras`, `.ckpt`, `.pth`) KHÔNG được push trực tiếp lên repository.
 
-1. Tải file model `best_EfficientNetB3.keras` từ liên kết lưu trữ đám mây của dự án: [Tải Model tại đây (Google Drive)](https://drive.google.com/file/d/1xaJAtbyHBJE5IRWwiv2U5ZaUnyI5wtq8/view?usp=drive_link).
-2. Đổi tên file vừa tải thành **`dr_grading_model.keras`** và đặt nó vào đường dẫn chuẩn sau:
-   `ai/weights/dr_grading_model.keras`
+### 1. Phân loại DR Grade (dr_grading_model.keras)
+1. Tải tệp model `best_EfficientNetB3.keras` từ Google Drive dự án: [Tải Model Grading tại đây (Google Drive)](https://drive.google.com/file/d/1xaJAtbyHBJE5IRWwiv2U5ZaUnyI5wtq8/view?usp=drive_link).
+2. Đặt vào đường dẫn chuẩn: `ai/weights/dr_grading_model.keras`.
 
-Nếu chưa có file này, khi bạn khởi chạy uvicorn, API sẽ tự động tạo một file rỗng để tránh sập server nhưng sẽ báo lỗi `503 Service Unavailable` khi bạn thực hiện gọi API `/analyze`.
+### 2. Phân đoạn tổn thương Attention U-Net (MA, HE, EX)
+1. Tải 3 tệp checkpoint `.ckpt` từ thư mục đám mây dự án: 📥 [Tải bộ Checkpoints Attention U-Net tại đây (Google Drive)](https://drive.google.com/drive/folders/1RvJSFmdrHxIxBLVQTIiECiQA5Ye817yf?usp=sharing).
+2. Đặt 3 tệp vào đường dẫn chuẩn trong Backend:
+   * `backend/checkpoints/idrid_MA/best-checkpoint-epoch=17-val_dice=0.0305.ckpt`
+   * `backend/checkpoints/idrid_HE/best-checkpoint-epoch=70-val_dice=0.0272.ckpt`
+   * `backend/checkpoints/idrid_EX/best-checkpoint-epoch=64-val_dice=0.0414.ckpt`
 
 ---
 

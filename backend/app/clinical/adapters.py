@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 from typing import Any, Dict
 
@@ -12,10 +13,102 @@ class AIServiceUnavailable(RuntimeError):
     pass
 
 
+class LocalGradingAdapter:
+    """Run the bundled RETFound checkpoint without a second HTTP service."""
+
+    def __init__(self, model_key: str = "grading"):
+        self.model_key = model_key
+
+    async def predict(self, image_bytes: bytes, eye: str) -> GradingResult:
+        from app.services.dr_inference import (
+            DRInferenceError,
+            predict_with_dr_model,
+        )
+
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(
+                None,
+                predict_with_dr_model,
+                image_bytes,
+                self.model_key,
+            )
+        except DRInferenceError as exc:
+            raise AIServiceUnavailable(f"Local grading model failed: {exc}") from exc
+        return GradingResult(
+            dr_grade=int(data["dr_grade"]),
+            dr_label=str(data["dr_label"]),
+            confidence=float(data["confidence"]),
+            probabilities=data["probabilities"],
+            model_version=str(data["model_version"]),
+        )
+
+
+class UnavailableSegmentationAdapter:
+    """Explicit safe fallback when no lesion-segmentation model is configured."""
+
+    async def predict(self, image_bytes: bytes, eye: str) -> SegmentationResult:
+        return SegmentationResult(
+            lesions=[],
+            lesion_mask_url=None,
+            model_version="not-configured",
+            status="not_available",
+            retinal_thickening_confirmed=None,
+            center_involved_confirmed_by_oct=None,
+        )
+
+
+class LocalSegmentationAdapter:
+    """
+    Chạy 3 mô hình Attention U-Net (MA/HE/EX) trực tiếp trong process Backend.
+    Tương đương với LocalGradingAdapter nhưng dành cho phân đoạn tổn thương.
+    """
+
+    async def predict(self, image_bytes: bytes, eye: str) -> SegmentationResult:
+        from app.services.lesion_inference import (
+            LesionInferenceError,
+            get_lesion_inference_service,
+        )
+
+        loop = asyncio.get_running_loop()
+        try:
+            data = await loop.run_in_executor(
+                None,
+                get_lesion_inference_service().predict,
+                image_bytes,
+            )
+        except LesionInferenceError as exc:
+            raise AIServiceUnavailable(
+                f"Local segmentation model failed: {exc}"
+            ) from exc
+
+        return SegmentationResult(
+            lesions=[
+                Lesion(
+                    key=item["key"],
+                    label=item["label"],
+                    detected=bool(item["detected"]),
+                    area_pct=float(item["area_pct"]),
+                    confidence=item.get("confidence"),
+                )
+                for item in data.get("lesions", [])
+            ],
+            lesion_mask_url=data.get("lesion_mask_url"),
+            model_version=str(data.get("model_version", "unknown")),
+            status=str(data.get("status", "ok")),
+        )
+
+
 class HttpGradingAdapter:
-    def __init__(self, base_url: str, timeout_seconds: float = 120.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 120.0,
+        model_key: str = "grading",
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.model_key = model_key
 
     async def predict(self, image_bytes: bytes, eye: str) -> GradingResult:
         if not self.base_url:
@@ -25,7 +118,7 @@ class HttpGradingAdapter:
                 response = await client.post(
                     f"{self.base_url}/analyze",
                     files={"file": (f"fundus-{eye}.png", BytesIO(image_bytes), "image/png")},
-                    data={"eye": eye},
+                    data={"eye": eye, "grading_model": self.model_key},
                 )
                 response.raise_for_status()
                 data = response.json()

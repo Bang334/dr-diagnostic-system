@@ -29,8 +29,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://dr_user:dr_password_2026@db:5432/dr_screening_db
       - ENV=production
-      - AI_GRADING_SERVICE_URL=http://ai-service:8001
-      - AI_SEGMENTATION_SERVICE_URL=http://ai-service:8002
+      - AI_GRADING_SERVICE_URL=local
+      - AI_SEGMENTATION_SERVICE_URL=disabled
     ports:
       - "8000:8000"
     volumes:
