@@ -52,6 +52,24 @@ class TestOnlyNotebookTests(unittest.TestCase):
         self.assertIn("LIMIT_PER_CLASS", self.source)
         self.assertIn("subprocess.Popen(", self.source)
 
+    def test_dispatches_few_shot_checkpoints_to_the_protonet_evaluator(self):
+        self.assertIn(
+            "fixed_support_target_domain_protonet",
+            self.source,
+        )
+        self.assertIn(
+            "EVALUATOR_MODULE = 'ai.grading.evaluate_fewshot'",
+            self.source,
+        )
+        self.assertIn(
+            "EVALUATOR_MODULE = 'ai.grading.evaluate_test'",
+            self.source,
+        )
+        self.assertIn(
+            "sys.executable, '-m', EVALUATOR_MODULE",
+            self.source,
+        )
+
     def test_evaluator_accepts_zip_with_only_grade_directories(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
