@@ -175,6 +175,7 @@ pgdata/
 # AI Models & Large Files (Weights) — tất cả model tập trung tại ai/weights/
 ai/weights/grading/
 ai/weights/segmentation/
+ai/weights/*
 *.keras
 *.h5
 *.pth
