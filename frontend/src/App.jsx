@@ -81,108 +81,27 @@ const suggestedRecallMonths = (followUp) => {
   return 6;
 };
 
-const MODEL_TRAINING_HISTORY = [
-  {
-    epoch: 0,
-    train_loss: 0.24487801545931742,
-    val_loss: 0.6046052977372577,
-    baseline_val_loss: 0.6460923599917935,
-    accuracy: 0.8578575632725133,
-    macro_f1: 0.8585212794360663,
-    balanced_accuracy: 0.8591153102636537,
-    qwk: 0.9262127204735553,
-    per_class_recall: {
-      'No DR': 0.8927631578947368,
-      Mild: 0.7969348659003831,
-      Moderate: 0.725518227305218,
-      Severe: 0.9491392801251957,
-      Proliferative: 0.9312210200927357,
-    },
+const SEMI_SUPERVISED_TEST_RESULT = {
+  loss: 0.4953,
+  accuracy: 0.8410,
+  macro_f1: 0.8429,
+  balanced_accuracy: 0.8486,
+  qwk: 0.9144,
+  per_class_recall: {
+    'No DR': 0.8638,
+    Mild: 0.8035,
+    Moderate: 0.7247,
+    Severe: 0.9500,
+    Proliferative: 0.9012,
   },
-  {
-    epoch: 1,
-    train_loss: 0.23772090411034566,
-    val_loss: 0.6027502635819482,
-    baseline_val_loss: 0.6460923599917935,
-    accuracy: 0.857563272513243,
-    macro_f1: 0.8588010114726362,
-    balanced_accuracy: 0.8594481194801723,
-    qwk: 0.9254163361895138,
-    per_class_recall: {
-      'No DR': 0.8644736842105263,
-      Mild: 0.8061302681992337,
-      Moderate: 0.7462473195139385,
-      Severe: 0.9514866979655712,
-      Proliferative: 0.9289026275115919,
-    },
-  },
-  {
-    epoch: 2,
-    train_loss: 0.2352696770437512,
-    val_loss: 0.6028904198082915,
-    baseline_val_loss: 0.6460923599917935,
-    accuracy: 0.8580047086521483,
-    macro_f1: 0.8591486616601995,
-    balanced_accuracy: 0.8596001018397808,
-    qwk: 0.9243369499938745,
-    per_class_recall: {
-      'No DR': 0.8703947368421052,
-      Mild: 0.7961685823754789,
-      Moderate: 0.7533952823445318,
-      Severe: 0.9491392801251957,
-      Proliferative: 0.9289026275115919,
-    },
-  },
-  {
-    epoch: 3,
-    train_loss: 0.233546375986731,
-    val_loss: 0.6033828016841952,
-    baseline_val_loss: 0.6460923599917935,
-    accuracy: 0.859181871689229,
-    macro_f1: 0.8599970884978214,
-    balanced_accuracy: 0.8605845549885032,
-    qwk: 0.9251960509181038,
-    per_class_recall: {
-      'No DR': 0.8835526315789474,
-      Mild: 0.7923371647509578,
-      Moderate: 0.7412437455325233,
-      Severe: 0.9507042253521126,
-      Proliferative: 0.9350850077279753,
-    },
-  },
-  {
-    epoch: 4,
-    train_loss: 0.23260474798652045,
-    val_loss: 0.6031295189731538,
-    baseline_val_loss: 0.6460923599917935,
-    accuracy: 0.8590347263095939,
-    macro_f1: 0.8599908852604259,
-    balanced_accuracy: 0.860751972251186,
-    qwk: 0.9254039104029455,
-    per_class_recall: {
-      'No DR': 0.8736842105263158,
-      Mild: 0.8022988505747126,
-      Moderate: 0.7419585418155825,
-      Severe: 0.9530516431924883,
-      Proliferative: 0.9327666151468316,
-    },
-  },
-];
-
-const bestByMaximum = (metric) => (
-  MODEL_TRAINING_HISTORY.reduce((best, current) => (
-    current[metric] > best[metric] ? current : best
-  ))
-);
-
-const BEST_MODEL_RECORD = bestByMaximum('qwk');
+};
 
 const EXPECTED_DISAGREEMENT_BALANCED = 0.25;
 const MAX_GRADE_DISTANCE_SQUARED = 16;
 const GRADE_ERROR_EXAMPLE = {
   samples: 1000,
-  accuracy: 0.858,
-  qwk: 0.926,
+  accuracy: SEMI_SUPERVISED_TEST_RESULT.accuracy,
+  qwk: SEMI_SUPERVISED_TEST_RESULT.qwk,
 };
 const GRADE_ERROR_EXAMPLE_RATE = 1 - GRADE_ERROR_EXAMPLE.accuracy;
 const GRADE_ERROR_EXAMPLE_CORRECT = GRADE_ERROR_EXAMPLE.samples * GRADE_ERROR_EXAMPLE.accuracy;
@@ -201,10 +120,6 @@ const GRADE_ERROR_WRONG_RMSE = Math.sqrt(GRADE_ERROR_WRONG_MSE);
 const GRADE_ERROR_MAE_MIN = (GRADE_ERROR_WRONG_MSE + 4) / 5;
 const GRADE_ERROR_MAE_MAX = (GRADE_ERROR_WRONG_MSE + 2) / 3;
 const GRADE_ERROR_MAE_MIDPOINT = (GRADE_ERROR_MAE_MIN + GRADE_ERROR_MAE_MAX) / 2;
-const BEST_RECORD_VAL_LOSS_IMPROVEMENT = (
-  (BEST_MODEL_RECORD.baseline_val_loss - BEST_MODEL_RECORD.val_loss)
-  / BEST_MODEL_RECORD.baseline_val_loss
-);
 
 const RECALL_LABELS = {
   'No DR': 'Không DR',
@@ -214,8 +129,10 @@ const RECALL_LABELS = {
   Proliferative: 'DR tăng sinh',
 };
 
-const formatPercent = (value) => `${(Math.ceil(value * 10000) / 100).toFixed(2)}%`;
-const formatDecimal = (value) => (Math.ceil(value * 100) / 100).toFixed(2);
+const formatPercent = (value) => `${(value * 100).toFixed(2)}%`;
+const formatMetric = (value) => value.toFixed(4);
+const formatDecimal = (value) => value.toFixed(2);
+const formatInteger = (value) => new Intl.NumberFormat('vi-VN').format(value);
 
 function App() {
   const dialog = useAppDialog();
@@ -708,7 +625,7 @@ function App() {
               <div>
                 <h1 style={{ fontSize: '32px', marginBottom: '8px' }}>Hiệu năng mô hình phân loại DR</h1>
                 <p style={{ color: 'var(--text-secondary)' }}>
-                  Bản ghi validation tốt nhất được chọn theo Quadratic Weighted Kappa.
+                  Kết quả trên tập test sau khi checkpoint grading tốt nhất được huấn luyện semi-supervised.
                 </p>
               </div>
 
@@ -717,54 +634,52 @@ function App() {
             <div className="metric-grid model-metric-grid">
               <div className="card metric-card model-metric-card">
                 <div className="metric-label"><Target size={17} aria-hidden="true" /> Accuracy</div>
-                <strong className="metric-value">{formatPercent(BEST_MODEL_RECORD.accuracy)}</strong>
+                <strong className="metric-value">{formatPercent(SEMI_SUPERVISED_TEST_RESULT.accuracy)}</strong>
                 <span className="metric-caption">Tỉ lệ dự đoán đúng chính xác grade</span>
               </div>
               <div className="card metric-card model-metric-card">
                 <div className="metric-label"><Award size={17} aria-hidden="true" /> QWK</div>
-                <strong className="metric-value metric-value-primary">{formatDecimal(BEST_MODEL_RECORD.qwk)}</strong>
-                <span className="metric-caption">Tiêu chí chính để chọn checkpoint</span>
+                <strong className="metric-value metric-value-primary">{formatMetric(SEMI_SUPERVISED_TEST_RESULT.qwk)}</strong>
+                <span className="metric-caption">Mức đồng thuận có xét khoảng cách grade</span>
               </div>
               <div className="card metric-card model-metric-card">
                 <div className="metric-label"><Gauge size={17} aria-hidden="true" /> Macro F1</div>
-                <strong className="metric-value">{formatPercent(BEST_MODEL_RECORD.macro_f1)}</strong>
+                <strong className="metric-value">{formatMetric(SEMI_SUPERVISED_TEST_RESULT.macro_f1)}</strong>
                 <span className="metric-caption">F1 trung bình đồng đều giữa 5 lớp</span>
               </div>
               <div className="card metric-card model-metric-card">
                 <div className="metric-label"><Activity size={17} aria-hidden="true" /> Balanced Accuracy</div>
-                <strong className="metric-value">{formatPercent(BEST_MODEL_RECORD.balanced_accuracy)}</strong>
+                <strong className="metric-value">{formatMetric(SEMI_SUPERVISED_TEST_RESULT.balanced_accuracy)}</strong>
                 <span className="metric-caption">Độ chính xác cân bằng theo lớp</span>
               </div>
             </div>
 
             <div className="model-analysis-grid">
-              {/* Cột trái: Loss + Sensitivity */}
+              {/* Cột trái: Test result + Sensitivity */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
                 <section className="card model-detail-card" aria-labelledby="loss-heading">
                   <div className="section-heading-row">
                     <div>
-                      <h3 id="loss-heading">Loss của checkpoint</h3>
+                      <h3 id="loss-heading">Kết quả đánh giá</h3>
                     </div>
-                    <span className="status-chip">
-                      Tốt hơn baseline {formatPercent(BEST_RECORD_VAL_LOSS_IMPROVEMENT)}
-                    </span>
+                    <span className="status-chip">Semi-supervised</span>
                   </div>
                   <div className="loss-grid">
                     <div>
-                      <span>Train loss</span>
-                      <strong>{formatDecimal(BEST_MODEL_RECORD.train_loss)}</strong>
+                      <span>Test loss</span>
+                      <strong>{formatMetric(SEMI_SUPERVISED_TEST_RESULT.loss)}</strong>
                     </div>
                     <div>
-                      <span>Validation loss</span>
-                      <strong>{formatDecimal(BEST_MODEL_RECORD.val_loss)}</strong>
+                      <span>Tập đánh giá</span>
+                      <strong>Test set</strong>
                     </div>
                     <div>
-                      <span>Baseline val loss</span>
-                      <strong>{formatDecimal(BEST_MODEL_RECORD.baseline_val_loss)}</strong>
+                      <span>Giai đoạn</span>
+                      <strong>Sau semi</strong>
                     </div>
                   </div>
                   <p className="model-note">
-                    Validation loss thấp hơn baseline, nhưng checkpoint được giữ vì có QWK cao nhất trong các epoch đã cung cấp.
+                    Đây là số liệu từ lần test lại sau khi mô hình grading tốt nhất tiếp tục được huấn luyện semi-supervised.
                   </p>
                 </section>
 
@@ -772,12 +687,12 @@ function App() {
                   <div className="section-heading-row">
                     <div>
                       <span className="section-eyebrow">Sensitivity theo lớp</span>
-                      <h3 id="recall-heading">Recall tại checkpoint tốt nhất</h3>
+                      <h3 id="recall-heading">Recall trên test set sau semi</h3>
                     </div>
                     <span className="status-chip">5 mức ICDR</span>
                   </div>
                   <div className="recall-list">
-                    {Object.entries(BEST_MODEL_RECORD.per_class_recall).map(([label, recall], index) => (
+                    {Object.entries(SEMI_SUPERVISED_TEST_RESULT.per_class_recall).map(([label, recall], index) => (
                       <div className="recall-row" key={label}>
                         <span className="recall-label">{RECALL_LABELS[label]}</span>
                         <div
@@ -807,14 +722,14 @@ function App() {
               <section className="card rmse-card" aria-labelledby="rmse-heading">
                 <div className="section-heading-row">
                   <div>
-                    <span className="section-eyebrow">Ước lượng độ lệch grade</span>
+                    <span className="section-eyebrow">Minh họa từ kết quả test semi</span>
                     <h3 id="rmse-heading">Ví dụ với 1.000 bệnh nhân</h3>
                   </div>
                   <Calculator size={22} color="var(--primary)" aria-hidden="true" />
                 </div>
 
                 <p className="example-intro">
-                  Với Accuracy <strong>{formatPercent(GRADE_ERROR_EXAMPLE.accuracy)}</strong> và QWK <strong>{formatDecimal(GRADE_ERROR_EXAMPLE.qwk)}</strong>:
+                  Với Accuracy <strong>{formatPercent(GRADE_ERROR_EXAMPLE.accuracy)}</strong> và QWK <strong>{formatMetric(GRADE_ERROR_EXAMPLE.qwk)}</strong>:
                 </p>
 
                 <div className="grade-error-summary">
@@ -838,7 +753,7 @@ function App() {
 
                 <div className="interpretation-callout">
                   <span>Diễn giải ngắn</span>
-                  Trong 142 ca sai, độ lệch tuyệt đối trung bình chỉ có thể ước lượng trong khoảng <strong>{formatDecimal(GRADE_ERROR_MAE_MIN)}–{formatDecimal(GRADE_ERROR_MAE_MAX)} grade</strong>. Nếu lấy giá trị giữa khoảng để minh họa thì khoảng <strong>{formatDecimal(GRADE_ERROR_MAE_MIDPOINT)} grade/ca sai</strong>.
+                  Trong {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} ca sai, độ lệch tuyệt đối trung bình chỉ có thể ước lượng trong khoảng <strong>{formatDecimal(GRADE_ERROR_MAE_MIN)}–{formatDecimal(GRADE_ERROR_MAE_MAX)} grade</strong>. Nếu lấy giá trị giữa khoảng để minh họa thì khoảng <strong>{formatDecimal(GRADE_ERROR_MAE_MIDPOINT)} grade/ca sai</strong>.
                 </div>
 
                 <details className="calculation-details">
@@ -854,21 +769,21 @@ function App() {
                     <ol className="calculation-steps">
                       <li>
                         <strong>Đếm số ca đúng và sai</strong>
-                        <div className="equation">Số ca đúng = 1.000 × 0.858 = 858 ca</div>
-                        <div className="equation">Số ca sai = 1.000 × (1 − 0.858) = 142 ca</div>
+                        <div className="equation">Số ca đúng = {formatInteger(GRADE_ERROR_EXAMPLE.samples)} × {formatMetric(GRADE_ERROR_EXAMPLE.accuracy)} = {formatInteger(GRADE_ERROR_EXAMPLE_CORRECT)} ca</div>
+                        <div className="equation">Số ca sai = {formatInteger(GRADE_ERROR_EXAMPLE.samples)} × (1 − {formatMetric(GRADE_ERROR_EXAMPLE.accuracy)}) = {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} ca</div>
                       </li>
                       <li>
                         <strong>Tính sai lệch quan sát từ QWK</strong>
                         <div className="equation">QWK = 1 − D<sub>o</sub> / D<sub>e</sub></div>
-                        <div className="equation">D<sub>o</sub> = (1 − 0.926) × 0.250 = {GRADE_ERROR_OBSERVED_DISAGREEMENT.toFixed(4)}</div>
+                        <div className="equation">D<sub>o</sub> = (1 − {formatMetric(GRADE_ERROR_EXAMPLE.qwk)}) × 0.250 = {GRADE_ERROR_OBSERVED_DISAGREEMENT.toFixed(4)}</div>
                       </li>
                       <li>
                         <strong>Đổi về tổng bình phương khoảng cách grade</strong>
-                        <div className="equation">SSE = 1.000 × (5 − 1)² × {GRADE_ERROR_OBSERVED_DISAGREEMENT.toFixed(4)} = {formatDecimal(GRADE_ERROR_SQUARED_SUM)}</div>
+                        <div className="equation">SSE = {formatInteger(GRADE_ERROR_EXAMPLE.samples)} × (5 − 1)² × {GRADE_ERROR_OBSERVED_DISAGREEMENT.toFixed(4)} = {formatDecimal(GRADE_ERROR_SQUARED_SUM)}</div>
                       </li>
                       <li>
-                        <strong>Tính MSE và RMSE trên 142 ca sai</strong>
-                        <div className="equation">MSE<sub>sai</sub> = {formatDecimal(GRADE_ERROR_SQUARED_SUM)} / 142 = {formatDecimal(GRADE_ERROR_WRONG_MSE)}</div>
+                        <strong>Tính MSE và RMSE trên {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} ca sai</strong>
+                        <div className="equation">MSE<sub>sai</sub> = {formatDecimal(GRADE_ERROR_SQUARED_SUM)} / {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} = {formatDecimal(GRADE_ERROR_WRONG_MSE)}</div>
                         <div className="equation equation-result">RMSE<sub>sai</sub> = √{formatDecimal(GRADE_ERROR_WRONG_MSE)} ≈ {formatDecimal(GRADE_ERROR_WRONG_RMSE)} grade</div>
                       </li>
                     </ol>
