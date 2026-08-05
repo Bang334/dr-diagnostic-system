@@ -18,6 +18,16 @@ class ClinicalSummaryDraft(BaseModel):
     provider: str = "gemini"
     model: str
     overview: str
+    diabetes_assessment_level: Literal[
+        "low",
+        "moderate",
+        "high",
+        "known_diabetes",
+        "discordant",
+        "insufficient_data",
+    ]
+    diabetes_assessment: str
+    diabetes_evidence: List[str] = Field(default_factory=list)
     diagnostic_impression: str
     diagnostic_basis: List[str] = Field(default_factory=list)
     diagnostic_limitations: List[str] = Field(default_factory=list)
@@ -88,6 +98,123 @@ def _follow_up_text(assessment: ScreeningAssessment) -> str:
 
 def _eye_label(eye: str) -> str:
     return "Mắt trái" if eye == "L" else "Mắt phải"
+
+
+def _diabetes_support(
+    context: ClinicalContext,
+    assessment: ScreeningAssessment,
+) -> tuple[str, str, List[str]]:
+    """Assess diabetes context from the record; retinal AI is supporting evidence only."""
+
+    evidence: List[str] = []
+    diabetes_type = (context.diabetes_type or "").strip()
+    hba1c = context.hba1c
+    history_parts: List[str] = []
+
+    positive_eyes = [
+        eye for eye in _assessed_eyes(assessment) if eye.grading.dr_grade > 0
+    ]
+
+    if diabetes_type:
+        level = "known_diabetes"
+        history_parts.append(f"mắc đái tháo đường {diabetes_type}")
+        if context.diabetes_duration_years is not None:
+            history_parts.append(
+                f"trong {context.diabetes_duration_years:g} năm"
+            )
+        evidence.append(f"Tiền sử trong hồ sơ: đái tháo đường {diabetes_type}.")
+    elif hba1c is None:
+        level = "insufficient_data"
+    elif hba1c < 5.7:
+        level = "discordant" if positive_eyes else "low"
+    elif hba1c < 6.5:
+        level = "high" if positive_eyes else "moderate"
+    else:
+        level = "high"
+
+    if hba1c is not None:
+        evidence.append(f"HbA1c gần nhất: {hba1c:g}%.")
+
+    retinal_sentence: str
+    if positive_eyes:
+        grades = "; ".join(
+            f"{_eye_label(eye.eye).lower()} Grade {eye.grading.dr_grade} – {eye.grading.dr_label}"
+            for eye in positive_eyes
+        )
+        detected_lesions = _unique(
+            [
+                lesion.label
+                for eye in positive_eyes
+                for lesion in eye.segmentation.lesions
+                if lesion.detected
+            ]
+        )
+        lesion_text = (
+            f", đồng thời ghi nhận {', '.join(detected_lesions)}"
+            if detected_lesions
+            else ""
+        )
+        retinal_sentence = (
+            f"Kết quả ảnh võng mạc cho thấy {grades}{lesion_text}, "
+            "là bằng chứng bổ sung về biến chứng võng mạc liên quan đến đái tháo đường."
+        )
+        evidence.append(
+            "Bằng chứng bổ sung từ ảnh: "
+            f"{grades}. Kết quả này phản ánh biến chứng võng mạc, không tự xác nhận đái tháo đường."
+        )
+    else:
+        retinal_sentence = (
+            "Ảnh võng mạc chưa ghi nhận DR (Grade 0), nhưng kết quả này không loại trừ "
+            "đái tháo đường."
+        )
+        evidence.append(
+            "Ảnh chưa ghi nhận DR (Grade 0); kết quả này không loại trừ đái tháo đường."
+        )
+
+    if diabetes_type:
+        history = " ".join(history_parts)
+        hba1c_sentence = (
+            f"HbA1c gần nhất là {hba1c:g}%. " if hba1c is not None else ""
+        )
+        statement = (
+            f"Hồ sơ ghi nhận người bệnh {history}. {hba1c_sentence}{retinal_sentence} "
+            "Các dữ liệu cần được bác sĩ tổng hợp để đánh giá kiểm soát đường huyết và mức độ biến chứng."
+        )
+    elif hba1c is None:
+        statement = (
+            "Chưa có tiền sử hoặc HbA1c để đánh giá tình trạng đái tháo đường. "
+            f"{retinal_sentence} Cần bổ sung xét nghiệm và bác sĩ xác nhận."
+        )
+    elif hba1c < 5.7:
+        risk_text = (
+            "Các dữ liệu đang không thống nhất"
+            if positive_eyes
+            else "Nguy cơ sàng lọc hiện ở mức thấp"
+        )
+        statement = (
+            f"{risk_text}: HbA1c {hba1c:g}% thấp hơn ngưỡng tiền đái tháo đường. "
+            f"{retinal_sentence} Cần bác sĩ đối chiếu vì một kết quả HbA1c đơn lẻ không loại trừ bệnh."
+        )
+    elif hba1c < 6.5:
+        risk_text = (
+            "Nguy cơ sàng lọc cao"
+            if positive_eyes
+            else "Nguy cơ sàng lọc trung bình"
+        )
+        statement = (
+            f"{risk_text}: HbA1c {hba1c:g}% nằm trong khoảng tiền đái tháo đường. "
+            f"{retinal_sentence} "
+            "Kết quả tổng hợp cho thấy cần đánh giá thêm bằng xét nghiệm và thăm khám lâm sàng."
+        )
+    else:
+        statement = (
+            f"Nguy cơ sàng lọc cao: HbA1c {hba1c:g}% nằm trong ngưỡng đái tháo đường. "
+            f"{retinal_sentence} "
+            "Kết quả ảnh làm tăng bằng chứng về biến chứng võng mạc nhưng không thay thế xét nghiệm "
+            "xác nhận và kết luận của bác sĩ."
+        )
+
+    return level, statement, evidence
 
 
 def _diagnostic_support(assessment: ScreeningAssessment) -> tuple[str, List[str], List[str]]:
@@ -163,6 +290,9 @@ def _rule_summary(
         risk_factors.append(f"Thời gian mắc đái tháo đường: {context.diabetes_duration_years:g} năm.")
     if context.hba1c is not None:
         risk_factors.append(f"HbA1c gần nhất: {context.hba1c:g}%.")
+    diabetes_level, diabetes_assessment, diabetes_evidence = _diabetes_support(
+        context, assessment
+    )
     diagnostic_impression, diagnostic_basis, diagnostic_limitations = _diagnostic_support(assessment)
     return ClinicalSummaryDraft(
         status=status,
@@ -172,6 +302,9 @@ def _rule_summary(
             f"Kết quả sàng lọc {screening_scope} có mức ưu tiên rà soát '{assessment.overall_priority}'. "
             "Đây là bản tổng hợp tự động, chưa phải chẩn đoán cuối cùng."
         ),
+        diabetes_assessment_level=diabetes_level,
+        diabetes_assessment=diabetes_assessment,
+        diabetes_evidence=diabetes_evidence,
         diagnostic_impression=diagnostic_impression,
         diagnostic_basis=diagnostic_basis,
         diagnostic_limitations=diagnostic_limitations,
@@ -233,13 +366,30 @@ class GeminiClinicalSummaryAdapter:
     def _prompt(payload: Dict[str, Any]) -> str:
         return (
             "Bạn là trợ lý soạn thảo báo cáo sàng lọc bệnh võng mạc đái tháo đường. "
-            "Bạn chỉ hỗ trợ chẩn đoán bệnh võng mạc đái tháo đường (DR) từ grade và bằng chứng tổn thương "
-            "được cung cấp; không chẩn đoán đái tháo đường từ ảnh fundus và không được diễn giải Grade 0 "
-            "thành không mắc đái tháo đường. "
+            "Hãy đánh giá tình trạng đái tháo đường chủ yếu từ tiền sử, loại đái tháo đường, HbA1c và "
+            "dữ liệu lâm sàng được cung cấp. Dùng DR Grade và tổn thương MA/HE/EX làm bằng chứng bổ sung "
+            "về biến chứng võng mạc, không dùng chúng độc lập để xác nhận hoặc loại trừ đái tháo đường. "
+            "Không được diễn giải Grade 0 thành không mắc đái tháo đường, không đưa ra tỷ lệ chắc chắn mắc "
+            "bệnh nếu payload không chứa xác suất từ một mô hình đái tháo đường đã được thẩm định. "
+            "Nếu HbA1c và ảnh võng mạc không thống nhất, phải nêu sự không thống nhất và khuyến nghị bác sĩ "
+            "đánh giá hoặc xét nghiệm xác nhận. "
+            "Phải phân loại diabetes_assessment_level đúng một trong các mã sau và không tạo mã khác: "
+            "known_diabetes nếu hồ sơ đã ghi nhận loại đái tháo đường; insufficient_data nếu chưa có tiền sử "
+            "và thiếu HbA1c; high nếu chưa có tiền sử nhưng HbA1c >= 6.5%; moderate nếu HbA1c từ 5.7% đến "
+            "dưới 6.5% và ảnh không ghi nhận DR; high nếu HbA1c từ 5.7% đến dưới 6.5% đồng thời DR Grade > 0 "
+            "hoặc có MA/HE/EX; low nếu HbA1c < 5.7% và ảnh Grade 0; discordant nếu HbA1c < 5.7% nhưng "
+            "DR Grade > 0 hoặc có MA/HE/EX. Không hạ mức nguy cơ chỉ vì Grade 0. "
+            "Khi không có tiền sử và mức là high, phải dùng cụm 'nguy cơ sàng lọc cao' hoặc 'nghi ngờ cao', "
+            "không dùng cụm 'kiểm soát đường huyết kém'. Nếu chưa có loại bệnh trong hồ sơ, phải nói rõ chưa "
+            "xác định được Type 1, Type 2 hay loại khác; không tự suy đoán loại bệnh. "
+            "Trường diabetes_assessment phải là một đoạn văn liền mạch kết hợp tiền sử, thời gian mắc bệnh, "
+            "HbA1c, DR Grade và tổn thương được phát hiện; không trình bày các nguồn này thành những kết luận "
+            "rời rạc và không được nói DR Grade thuộc ngưỡng chẩn đoán đái tháo đường. "
             "Chỉ tổng hợp dữ liệu JSON được cung cấp; không tự đổi grade, confidence, mức ưu tiên, "
             "không chẩn đoán DME khi chưa có OCT, không kê đơn và không khẳng định thay bác sĩ. "
             "Viết tiếng Việt ngắn gọn, dễ duyệt. Trả về đúng một JSON object gồm các khóa: "
-            "overview (string), diagnostic_impression (string), diagnostic_basis (array string), "
+            "overview (string), diabetes_assessment_level (string), diabetes_assessment (string), "
+            "diabetes_evidence (array string), diagnostic_impression (string), diagnostic_basis (array string), "
             "diagnostic_limitations (array string), key_findings (array string), risk_factors (array string), "
             "recommended_actions (array string), follow_up (string), safety_note (string). "
             "Trường follow_up bắt buộc ghi rõ thời gian tái khám cho từng mắt và phải sao chép nguyên văn "

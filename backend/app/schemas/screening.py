@@ -52,6 +52,9 @@ class ClinicalSummaryResponse(BaseModel):
     provider: str
     model: str
     overview: str
+    diabetes_assessment_level: str
+    diabetes_assessment: str
+    diabetes_evidence: List[str]
     diagnostic_impression: str
     diagnostic_basis: List[str]
     diagnostic_limitations: List[str]

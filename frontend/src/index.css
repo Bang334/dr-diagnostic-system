@@ -1368,6 +1368,84 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
+.grade-distance-summary .grade-distance-primary {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.grade-distance-summary .grade-distance-primary strong {
+  color: var(--primary);
+}
+
+.grade-distance-distribution {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-light);
+}
+
+.grade-distance-distribution-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.grade-distance-distribution-heading span:first-child {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.grade-distance-row {
+  display: grid;
+  grid-template-columns: 92px minmax(90px, 1fr) 70px 58px;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  font-size: 12px;
+}
+
+.grade-distance-label {
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+
+.grade-distance-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--surface-muted);
+}
+
+.grade-distance-fill {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+}
+
+.grade-distance-row strong,
+.grade-distance-row > span:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.grade-distance-row > span:last-child {
+  color: var(--text-muted);
+}
+
+.grade-distance-note {
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  border-left: 3px solid var(--primary);
+  color: var(--text-secondary);
+  background: var(--primary-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .interpretation-callout {
   margin-top: 12px;
   padding: 12px 14px;
@@ -2080,6 +2158,33 @@ code {
 
   .grade-error-summary {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .grade-distance-distribution-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .grade-distance-row {
+    grid-template-columns: minmax(0, 1fr) 72px;
+    gap: 5px 10px;
+    padding: 5px 0;
+  }
+
+  .grade-distance-row > span:last-child {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .grade-distance-track {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .grade-distance-row strong {
+    grid-column: 2;
+    grid-row: 2;
   }
 
   .recall-row {

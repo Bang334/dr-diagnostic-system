@@ -77,6 +77,22 @@ class ClinicalSummaryTests(unittest.TestCase):
         self.assertEqual(result.status, "fallback")
         self.assertEqual(result.provider, "local-rules")
         self.assertIn("HbA1c", " ".join(result.risk_factors))
+        self.assertEqual(result.diabetes_assessment_level, "known_diabetes")
+        self.assertIn("Type 2", result.diabetes_assessment)
+        self.assertIn("4 năm", result.diabetes_assessment)
+        self.assertIn("HbA1c gần nhất là 6.5%", result.diabetes_assessment)
+        self.assertIn("Grade 2", result.diabetes_assessment)
+        self.assertTrue(any("Grade 2" in item for item in result.diabetes_evidence))
+
+    def test_hba1c_range_is_primary_and_grade_is_supporting_evidence(self):
+        result = build_rule_summary(ClinicalContext(hba1c=6.7), assessment())
+        self.assertEqual(result.diabetes_assessment_level, "high")
+        self.assertIn("HbA1c 6.7%", result.diabetes_assessment)
+        self.assertIn("Grade 2", result.diabetes_assessment)
+        self.assertIn("bằng chứng", result.diabetes_assessment)
+        self.assertTrue(
+            any("không tự xác nhận" in item for item in result.diabetes_evidence)
+        )
 
     def test_rule_summary_states_recall_window_for_each_eye(self):
         result = build_rule_summary(
@@ -102,8 +118,13 @@ class ClinicalSummaryTests(unittest.TestCase):
         self.assertIn("sao chép nguyên văn", prompt)
         self.assertIn("follow_up_window", prompt)
         self.assertIn("không tự rút ngắn hoặc kéo dài", prompt)
-        self.assertIn("chỉ hỗ trợ chẩn đoán bệnh võng mạc đái tháo đường", prompt)
-        self.assertIn("không chẩn đoán đái tháo đường", prompt)
+        self.assertIn("đánh giá tình trạng đái tháo đường chủ yếu", prompt)
+        self.assertIn("làm bằng chứng bổ sung", prompt)
+        self.assertIn("không dùng chúng độc lập", prompt)
+        self.assertIn("một đoạn văn liền mạch", prompt)
+        self.assertIn("diabetes_assessment_level đúng một trong các mã", prompt)
+        self.assertIn("nguy cơ sàng lọc cao", prompt)
+        self.assertIn("không tự suy đoán loại bệnh", prompt)
 
 
 if __name__ == "__main__":

@@ -21,8 +21,6 @@ import {
   Menu,
   X,
   Award,
-  Calculator,
-  ChevronDown,
   Gauge,
   Target,
   CalendarPlus,
@@ -96,30 +94,20 @@ const SEMI_SUPERVISED_TEST_RESULT = {
   },
 };
 
-const EXPECTED_DISAGREEMENT_BALANCED = 0.25;
-const MAX_GRADE_DISTANCE_SQUARED = 16;
-const GRADE_ERROR_EXAMPLE = {
-  samples: 1000,
-  accuracy: SEMI_SUPERVISED_TEST_RESULT.accuracy,
-  qwk: SEMI_SUPERVISED_TEST_RESULT.qwk,
+const GRADE_DISTANCE_TEST_RESULT = {
+  total_predictions: 8691,
+  correct_predictions: 7308,
+  wrong_predictions: 1383,
+  mean_grade_distance_all: 0.2184,
+  mean_grade_distance_wrong: 1.3724,
+  max_grade_distance: 4,
+  wrong_grade_distance_counts: {
+    1: 930,
+    2: 398,
+    3: 48,
+    4: 7,
+  },
 };
-const GRADE_ERROR_EXAMPLE_RATE = 1 - GRADE_ERROR_EXAMPLE.accuracy;
-const GRADE_ERROR_EXAMPLE_CORRECT = GRADE_ERROR_EXAMPLE.samples * GRADE_ERROR_EXAMPLE.accuracy;
-const GRADE_ERROR_EXAMPLE_WRONG = GRADE_ERROR_EXAMPLE.samples * GRADE_ERROR_EXAMPLE_RATE;
-const GRADE_ERROR_OBSERVED_DISAGREEMENT = (
-  (1 - GRADE_ERROR_EXAMPLE.qwk) * EXPECTED_DISAGREEMENT_BALANCED
-);
-const GRADE_ERROR_SQUARED_SUM = (
-  GRADE_ERROR_EXAMPLE.samples
-  *
-  MAX_GRADE_DISTANCE_SQUARED
-  * GRADE_ERROR_OBSERVED_DISAGREEMENT
-);
-const GRADE_ERROR_WRONG_MSE = GRADE_ERROR_SQUARED_SUM / GRADE_ERROR_EXAMPLE_WRONG;
-const GRADE_ERROR_WRONG_RMSE = Math.sqrt(GRADE_ERROR_WRONG_MSE);
-const GRADE_ERROR_MAE_MIN = (GRADE_ERROR_WRONG_MSE + 4) / 5;
-const GRADE_ERROR_MAE_MAX = (GRADE_ERROR_WRONG_MSE + 2) / 3;
-const GRADE_ERROR_MAE_MIDPOINT = (GRADE_ERROR_MAE_MIN + GRADE_ERROR_MAE_MAX) / 2;
 
 const RECALL_LABELS = {
   'No DR': 'Không DR',
@@ -131,7 +119,6 @@ const RECALL_LABELS = {
 
 const formatPercent = (value) => `${(value * 100).toFixed(2)}%`;
 const formatMetric = (value) => value.toFixed(4);
-const formatDecimal = (value) => value.toFixed(2);
 const formatInteger = (value) => new Intl.NumberFormat('vi-VN').format(value);
 
 function App() {
@@ -718,100 +705,88 @@ function App() {
                 </section>
               </div>
 
-              {/* Cột phải: Ước lượng độ lệch grade */}
-              <section className="card rmse-card" aria-labelledby="rmse-heading">
+              {/* Cột phải: Độ lệch grade đo trực tiếp từ test predictions */}
+              <section className="card rmse-card grade-distance-card" aria-labelledby="grade-distance-heading">
                 <div className="section-heading-row">
                   <div>
-                    <span className="section-eyebrow">Minh họa từ kết quả test semi</span>
-                    <h3 id="rmse-heading">Ví dụ với 1.000 bệnh nhân</h3>
+                    <span className="section-eyebrow">Sai lệch đo trực tiếp trên test set</span>
+                    <h3 id="grade-distance-heading">Khoảng cách giữa grade thật và dự đoán</h3>
                   </div>
-                  <Calculator size={22} color="var(--primary)" aria-hidden="true" />
+                  <span className="status-chip">
+                    {formatInteger(GRADE_DISTANCE_TEST_RESULT.total_predictions)} ảnh
+                  </span>
                 </div>
 
                 <p className="example-intro">
-                  Với Accuracy <strong>{formatPercent(GRADE_ERROR_EXAMPLE.accuracy)}</strong> và QWK <strong>{formatMetric(GRADE_ERROR_EXAMPLE.qwk)}</strong>:
+                  Thống kê trực tiếp từ từng dự đoán sau semi-supervised, không suy ra từ Accuracy hoặc QWK.
                 </p>
 
-                <div className="grade-error-summary">
+                <div className="grade-error-summary grade-distance-summary">
+                  <div className="grade-distance-primary">
+                    <span>Trung bình trên ca sai</span>
+                    <strong>{formatMetric(GRADE_DISTANCE_TEST_RESULT.mean_grade_distance_wrong)} grade</strong>
+                  </div>
                   <div>
-                    <span>Dự đoán đúng</span>
-                    <strong>{GRADE_ERROR_EXAMPLE_CORRECT.toFixed(0)} ca</strong>
+                    <span>Trung bình toàn test</span>
+                    <strong>{formatMetric(GRADE_DISTANCE_TEST_RESULT.mean_grade_distance_all)} grade</strong>
                   </div>
                   <div>
                     <span>Dự đoán sai</span>
-                    <strong>{GRADE_ERROR_EXAMPLE_WRONG.toFixed(0)} ca</strong>
+                    <strong>
+                      {formatInteger(GRADE_DISTANCE_TEST_RESULT.wrong_predictions)} ca · {' '}
+                      {formatPercent(
+                        GRADE_DISTANCE_TEST_RESULT.wrong_predictions
+                        / GRADE_DISTANCE_TEST_RESULT.total_predictions
+                      )}
+                    </strong>
                   </div>
                   <div>
-                    <span>RMSE trên ca sai</span>
-                    <strong>{formatDecimal(GRADE_ERROR_WRONG_RMSE)} grade</strong>
-                  </div>
-                  <div>
-                    <span>Khoảng MAE có thể có</span>
-                    <strong>{formatDecimal(GRADE_ERROR_MAE_MIN)}–{formatDecimal(GRADE_ERROR_MAE_MAX)} grade</strong>
+                    <span>Lệch lớn nhất</span>
+                    <strong>{GRADE_DISTANCE_TEST_RESULT.max_grade_distance} grade</strong>
                   </div>
                 </div>
 
-                <div className="interpretation-callout">
-                  <span>Diễn giải ngắn</span>
-                  Trong {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} ca sai, độ lệch tuyệt đối trung bình chỉ có thể ước lượng trong khoảng <strong>{formatDecimal(GRADE_ERROR_MAE_MIN)}–{formatDecimal(GRADE_ERROR_MAE_MAX)} grade</strong>. Nếu lấy giá trị giữa khoảng để minh họa thì khoảng <strong>{formatDecimal(GRADE_ERROR_MAE_MIDPOINT)} grade/ca sai</strong>.
+                <div className="grade-distance-distribution" aria-labelledby="grade-distance-distribution-heading">
+                  <div className="grade-distance-distribution-heading">
+                    <span id="grade-distance-distribution-heading">Phân bố các ca dự đoán sai</span>
+                    <span>% trên {formatInteger(GRADE_DISTANCE_TEST_RESULT.wrong_predictions)} ca sai</span>
+                  </div>
+                  {Object.entries(GRADE_DISTANCE_TEST_RESULT.wrong_grade_distance_counts).map(([distance, count], index) => {
+                    const ratio = count / GRADE_DISTANCE_TEST_RESULT.wrong_predictions;
+                    return (
+                      <div className="grade-distance-row" key={distance}>
+                        <span className="grade-distance-label">Lệch {distance} bậc</span>
+                        <div
+                          className="grade-distance-track"
+                          role="progressbar"
+                          aria-label={`Số ca dự đoán sai lệch ${distance} bậc`}
+                          aria-valuemin="0"
+                          aria-valuemax="100"
+                          aria-valuenow={(ratio * 100).toFixed(2)}
+                        >
+                          <div
+                            className="grade-distance-fill"
+                            style={{
+                              width: `${ratio * 100}%`,
+                              backgroundColor: colors.drGrades[index + 1].color,
+                            }}
+                          />
+                        </div>
+                        <strong>{formatInteger(count)} ca</strong>
+                        <span>{formatPercent(ratio)}</span>
+                      </div>
+                    );
+                  })}
                 </div>
 
-                <details className="calculation-details">
-                  <summary>
-                    <span>Xem công thức và cách tính chi tiết</span>
-                    <ChevronDown size={18} aria-hidden="true" />
-                  </summary>
-                  <div className="calculation-content">
-                    <div className="calculation-assumption" role="note">
-                      <strong>Giả định:</strong> 5 grade 0–4 có phân bố thật và dự đoán cân bằng, vì vậy sai lệch kỳ vọng D<sub>e</sub> = 0.250. Không có confusion matrix nên không thể tính MAE chính xác.
-                    </div>
-
-                    <ol className="calculation-steps">
-                      <li>
-                        <strong>Đếm số ca đúng và sai</strong>
-                        <div className="equation">Số ca đúng = {formatInteger(GRADE_ERROR_EXAMPLE.samples)} × {formatMetric(GRADE_ERROR_EXAMPLE.accuracy)} = {formatInteger(GRADE_ERROR_EXAMPLE_CORRECT)} ca</div>
-                        <div className="equation">Số ca sai = {formatInteger(GRADE_ERROR_EXAMPLE.samples)} × (1 − {formatMetric(GRADE_ERROR_EXAMPLE.accuracy)}) = {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} ca</div>
-                      </li>
-                      <li>
-                        <strong>Tính sai lệch quan sát từ QWK</strong>
-                        <div className="equation">QWK = 1 − D<sub>o</sub> / D<sub>e</sub></div>
-                        <div className="equation">D<sub>o</sub> = (1 − {formatMetric(GRADE_ERROR_EXAMPLE.qwk)}) × 0.250 = {GRADE_ERROR_OBSERVED_DISAGREEMENT.toFixed(4)}</div>
-                      </li>
-                      <li>
-                        <strong>Đổi về tổng bình phương khoảng cách grade</strong>
-                        <div className="equation">SSE = {formatInteger(GRADE_ERROR_EXAMPLE.samples)} × (5 − 1)² × {GRADE_ERROR_OBSERVED_DISAGREEMENT.toFixed(4)} = {formatDecimal(GRADE_ERROR_SQUARED_SUM)}</div>
-                      </li>
-                      <li>
-                        <strong>Tính MSE và RMSE trên {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} ca sai</strong>
-                        <div className="equation">MSE<sub>sai</sub> = {formatDecimal(GRADE_ERROR_SQUARED_SUM)} / {formatInteger(GRADE_ERROR_EXAMPLE_WRONG)} = {formatDecimal(GRADE_ERROR_WRONG_MSE)}</div>
-                        <div className="equation equation-result">RMSE<sub>sai</sub> = √{formatDecimal(GRADE_ERROR_WRONG_MSE)} ≈ {formatDecimal(GRADE_ERROR_WRONG_RMSE)} grade</div>
-                      </li>
-                    </ol>
-
-                    <div className="weight-table-wrap" role="region" aria-label="Bảng trọng số sai lệch QWK" tabIndex="0">
-                      <table className="weight-table">
-                        <thead>
-                          <tr>
-                            <th>Khoảng cách grade</th>
-                            <th>Ví dụ</th>
-                            <th>Trọng số phạt</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr><td>0</td><td>0 → 0</td><td>0.000</td></tr>
-                          <tr><td>1</td><td>0 → 1</td><td>0.063</td></tr>
-                          <tr><td>2</td><td>0 → 2</td><td>0.250</td></tr>
-                          <tr><td>3</td><td>0 → 3</td><td>0.563</td></tr>
-                          <tr><td>4</td><td>0 → 4</td><td>1.000</td></tr>
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <p className="model-note">
-                      Accuracy coi mọi dự đoán sai như nhau. QWK phạt lỗi lệch xa mạnh hơn theo bình phương khoảng cách. Muốn biết MAE thật sự, cần tính trực tiếp mean(|y<sub>true</sub> − y<sub>pred</sub>|) từ toàn bộ dự đoán.
-                    </p>
-                  </div>
-                </details>
+                <p className="grade-distance-note">
+                  {formatInteger(GRADE_DISTANCE_TEST_RESULT.correct_predictions)} dự đoán đúng có khoảng cách bằng 0.
+                  Trong các ca sai, phần lớn lệch 1 bậc; chỉ {' '}
+                  {formatInteger(
+                    GRADE_DISTANCE_TEST_RESULT.wrong_grade_distance_counts[3]
+                    + GRADE_DISTANCE_TEST_RESULT.wrong_grade_distance_counts[4]
+                  )} ca lệch từ 3 bậc trở lên.
+                </p>
               </section>
             </div>
           </div>
@@ -1123,6 +1098,12 @@ function App() {
                             : 'Bản phân tích xác định từ logic lâm sàng có sẵn trong backend.'}
                         </p>
                         <p style={{ fontSize: '13px', lineHeight: 1.65 }}>{selectedClinicalSummary.overview}</p>
+                        {selectedClinicalSummary.diabetes_assessment && (
+                          <article className="diagnostic-support-card">
+                            <h4>Đánh giá tình trạng đái tháo đường</h4>
+                            <p>{selectedClinicalSummary.diabetes_assessment}</p>
+                          </article>
+                        )}
                         <article className="diagnostic-support-card">
                           <h4>Nhận định hỗ trợ chẩn đoán DR</h4>
                           <p>{selectedClinicalSummary.diagnostic_impression}</p>
