@@ -49,8 +49,6 @@ chứng, thị lực và khả năng theo dõi đều có thể làm thay đổi
 
 ## Điều hệ thống không được suy luận
 
-- Không chẩn đoán DME từ diện tích hard exudate. Center involvement cần dày
-  võng mạc, vị trí so với hố trung tâm và/hoặc OCT.
 - Không gọi “high-risk PDR” từ tổng diện tích hemorrhage. Cần nhận diện tân
   mạch, xuất huyết trước võng mạc/dịch kính và bác sĩ xác nhận.
 - Không dùng confidence 70%, diện tích lesion hoặc điểm cộng HbA1c/huyết áp như

@@ -100,7 +100,7 @@ const RULES = [
   },
   {
     trigger: 'Grade 2 — NPDR trung bình',
-    output: 'Gợi ý 3–6 tháng; bác sĩ phải cá thể hóa và đánh giá giảm thị lực/nghi DME.',
+    output: 'Gợi ý 3–6 tháng; bác sĩ phải cá thể hóa và đánh giá giảm thị lực.',
     basis: 'Mốc bảo thủ của hệ thống',
     kind: 'operational',
     code: 'clinical/analysis.py:79–82',
@@ -125,13 +125,6 @@ const RULES = [
     basis: 'Heuristic vận hành, cần calibration theo cơ sở',
     kind: 'operational',
     code: 'clinical/analysis.py:97–102',
-  },
-  {
-    trigger: 'Có hard exudate',
-    output: 'Yêu cầu đánh giá hoàng điểm/OCT; không tự kết luận DME.',
-    basis: 'Cờ an toàn nội bộ',
-    kind: 'safety',
-    code: 'clinical/analysis.py:55–58',
   },
   {
     trigger: 'HbA1c > 8%',
@@ -300,9 +293,8 @@ export default function ProjectEvidencePage() {
             <h3><AlertTriangle size={19} aria-hidden="true" /> Không được dùng để</h3>
             <ul>
               <li>Chẩn đoán hoặc loại trừ đái tháo đường từ ảnh fundus.</li>
-              <li>Tự kết luận DME chỉ từ hard exudate hay diện tích tổn thương.</li>
               <li>Tự chỉ định anti-VEGF, laser, PRP, phẫu thuật hoặc thuốc.</li>
-              <li>Thay thế khám trực tiếp, OCT, xét nghiệm hoặc quyết định của bác sĩ.</li>
+              <li>Thay thế khám trực tiếp, xét nghiệm hoặc quyết định của bác sĩ.</li>
             </ul>
           </article>
         </div>

@@ -12,8 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAppDialog } from './AppDialogProvider';
-
-const RECALL_MONTH_OPTIONS = [1, 2, 3, 6, 12];
+import { RECALL_MONTH_OPTIONS, suggestedRecallMonths } from '../utils/dateHelpers';
 
 const STATUS_LABELS = {
   Pending: 'Đang chờ phân tích',
@@ -124,7 +123,7 @@ export default function ScreeningDetailPanel({
       </div>
 
       {canReview && detail.status === 'AI_Analyzed' && (
-        <DoctorReviewForm detail={detail} onSubmit={onSubmitReview} />
+        <DoctorReviewForm key={detail.id} detail={detail} onSubmit={onSubmitReview} />
       )}
 
       {detail.recall && (
@@ -154,22 +153,27 @@ export default function ScreeningDetailPanel({
   );
 }
 
-export function DoctorReviewForm({ detail, onSubmit }) {
+export function DoctorReviewForm({ detail, onSubmit, suggestedFollowUp = '' }) {
   const dialog = useAppDialog();
   const initialEyeReview = (eye) => ({
     final_dr_grade: eye?.ai_result?.dr_grade ?? 0,
     is_agree_with_ai: true,
     clinical_notes: '',
   });
+  const initialRecallMonths = suggestedRecallMonths(
+    suggestedFollowUp,
+    [detail.left_eye?.ai_result?.dr_grade, detail.right_eye?.ai_result?.dr_grade],
+  );
   const [form, setForm] = useState({
     left_eye_review: detail.left_eye ? initialEyeReview(detail.left_eye) : null,
     right_eye_review: detail.right_eye ? initialEyeReview(detail.right_eye) : null,
-    recall_in_months: 12,
+    recall_in_months: initialRecallMonths,
     risk_stratification: 'Low',
     recommendation: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+  const [recallWasEdited, setRecallWasEdited] = useState(false);
 
   const updateEye = (key, field, value) => {
     setForm((current) => ({
@@ -188,6 +192,7 @@ export function DoctorReviewForm({ detail, onSubmit }) {
       ...current,
       recall_in_months: RECALL_MONTH_OPTIONS[nextIndex],
     }));
+    setRecallWasEdited(true);
   };
 
   const handleSubmit = async (event) => {
@@ -255,10 +260,13 @@ export function DoctorReviewForm({ detail, onSubmit }) {
             <select
               id="doctor-recall-months"
               value={form.recall_in_months}
-              onChange={(event) => setForm((current) => ({
-                ...current,
-                recall_in_months: Number(event.target.value),
-              }))}
+              onChange={(event) => {
+                setForm((current) => ({
+                  ...current,
+                  recall_in_months: Number(event.target.value),
+                }));
+                setRecallWasEdited(true);
+              }}
             >
               {RECALL_MONTH_OPTIONS.map((months) => (
                 <option key={months} value={months}>{months} tháng</option>
@@ -273,6 +281,11 @@ export function DoctorReviewForm({ detail, onSubmit }) {
               <Plus size={16} aria-hidden="true" />
             </button>
           </div>
+          <small className="recall-month-helper" aria-live="polite">
+            {recallWasEdited
+              ? 'Bác sĩ đã điều chỉnh thời gian tái khám.'
+              : 'Tự động đặt theo gợi ý tái khám phía trên; bác sĩ có thể điều chỉnh.'}
+          </small>
         </div>
         <label>
           Mức nguy cơ

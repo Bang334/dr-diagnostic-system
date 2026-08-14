@@ -53,8 +53,6 @@ class UnavailableSegmentationAdapter:
             lesion_mask_url=None,
             model_version="not-configured",
             status="not_available",
-            retinal_thickening_confirmed=None,
-            center_involved_confirmed_by_oct=None,
         )
 
 
@@ -151,7 +149,6 @@ class HttpSegmentationAdapter:
                 detected=bool(item.get("detected", False)),
                 area_pct=float(item.get("area_pct", 0)),
                 confidence=item.get("confidence"),
-                distance_to_fovea_mm=item.get("distance_to_fovea_mm"),
             )
             for item in raw
         ]
@@ -176,6 +173,4 @@ class HttpSegmentationAdapter:
             lesion_mask_url=data.get("lesion_mask_url") or data.get("mask_url"),
             model_version=str(data.get("model_version", "unknown")),
             status=str(data.get("status", "ok")),
-            retinal_thickening_confirmed=data.get("retinal_thickening_confirmed"),
-            center_involved_confirmed_by_oct=data.get("center_involved_confirmed_by_oct"),
         )

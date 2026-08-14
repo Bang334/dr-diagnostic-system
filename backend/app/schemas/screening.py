@@ -39,7 +39,6 @@ class EyeAnalysisResponse(BaseModel):
     review_priority: str
     follow_up_window: str
     referral: str
-    macular_status: str
     findings: List[str]
     actions: List[str]
     safety_flags: List[str]

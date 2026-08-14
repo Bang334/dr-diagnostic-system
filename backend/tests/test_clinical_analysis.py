@@ -41,9 +41,8 @@ class FakeGradingAdapter:
 
 
 class FakeSegmentationAdapter:
-    def __init__(self, *, hard_exudate=False, oct_center=None):
+    def __init__(self, *, hard_exudate=False):
         self.hard_exudate = hard_exudate
-        self.oct_center = oct_center
 
     async def predict(self, image_bytes: bytes, eye: str) -> SegmentationResult:
         return SegmentationResult(
@@ -56,7 +55,6 @@ class FakeSegmentationAdapter:
                 )
             ],
             model_version="test-segmenter",
-            center_involved_confirmed_by_oct=self.oct_center,
         )
 
 
@@ -111,12 +109,17 @@ class ClinicalAnalysisTests(unittest.TestCase):
         self.assertEqual(result.left_eye.quality["fundus"].status, "ReviewRequired")
         self.assertTrue(result.left_eye.quality["fundus"].requires_human_review)
 
-    def test_hard_exudate_area_does_not_diagnose_dme(self):
+    def test_hard_exudate_does_not_create_a_macular_assessment(self):
         result = self.analyze(
-            ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter(hard_exudate=True))
+            ClinicalAnalysisModule(
+                FakeGradingAdapter(grades={"L": 0, "R": 0}),
+                FakeSegmentationAdapter(hard_exudate=True),
+            )
         )
-        self.assertEqual(result.left_eye.macular_status, "indeterminate_requires_macular_assessment")
-        self.assertNotIn("center_involved_dme", result.left_eye.macular_status)
+        self.assertEqual(result.left_eye.review_priority, "routine")
+        serialized = str(result.left_eye.model_dump())
+        self.assertNotIn("macular", serialized.lower())
+        self.assertNotIn("hoàng điểm", serialized.lower())
 
     def test_pdr_does_not_use_hemorrhage_area_as_24_hour_proxy(self):
         result = self.analyze(

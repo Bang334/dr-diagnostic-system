@@ -25,7 +25,7 @@ GUIDELINE_IDS = [
 ]
 
 DISCLAIMER = (
-    "Kết quả là dự thảo hỗ trợ sàng lọc, không thay thế khám mắt giãn đồng tử, OCT hoặc "
+    "Kết quả là dự thảo hỗ trợ sàng lọc, không thay thế khám mắt toàn diện hoặc "
     "chẩn đoán của bác sĩ nhãn khoa. Mọi lịch hẹn và điều trị phải được bác sĩ xác nhận."
 )
 
@@ -36,37 +36,11 @@ class InvalidFundusSet(ValueError):
         self.quality = quality
 
 
-def _macular_status(segmentation) -> tuple[str, list[str]]:
-    if segmentation.center_involved_confirmed_by_oct is True:
-        return "center_involved_dme_confirmed_by_oct", [
-            "Có bằng chứng OCT do nguồn tích hợp cung cấp; bác sĩ phải xác nhận chẩn đoán và xử trí."
-        ]
-    if segmentation.retinal_thickening_confirmed is True:
-        near_fovea = any(
-            lesion.detected
-            and lesion.distance_to_fovea_mm is not None
-            and lesion.distance_to_fovea_mm < 1.0
-            for lesion in segmentation.lesions
-        )
-        return (
-            "suspected_center_involved_dme" if near_fovea else "suspected_non_center_dme",
-            ["Cần bác sĩ/OCT xác nhận mức độ phù hoàng điểm."],
-        )
-    if any(l.detected and l.key == "hard_exudate" for l in segmentation.lesions):
-        return "indeterminate_requires_macular_assessment", [
-            "Có xuất tiết cứng; không thể kết luận DME nếu thiếu dày võng mạc, vị trí hố trung tâm hoặc OCT."
-        ]
-    return "not_assessed", ["Ảnh màu đơn thuần không loại trừ phù hoàng điểm."]
-
-
 def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
     grade = grading.dr_grade
     safety_flags = []
     findings = [f"ICDR Grade {grade}: {grading.dr_label}."]
     actions = ["Bác sĩ xác nhận phân giai đoạn trên bộ ảnh và đối chiếu khám lâm sàng."]
-
-    macular_status, macular_notes = _macular_status(segmentation)
-    findings.extend(macular_notes)
 
     if grade == 4:
         priority = "urgent"
@@ -79,7 +53,7 @@ def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
     elif grade == 2:
         priority = "prompt"
         follow_up = "Khoảng 3–6 tháng, bác sĩ cá thể hóa"
-        referral = "Theo dõi tại cơ sở đủ năng lực hoặc chuyển chuyên khoa khi giảm thị lực/nghi DME."
+        referral = "Theo dõi tại cơ sở đủ năng lực hoặc chuyển chuyên khoa khi giảm thị lực."
     elif grade == 1:
         priority = "routine"
         follow_up = "Khoảng 6–12 tháng, bác sĩ cá thể hóa"
@@ -88,13 +62,6 @@ def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
         priority = "routine"
         follow_up = "Khoảng 12 tháng, có thể điều chỉnh theo nguy cơ"
         referral = "Tiếp tục sàng lọc định kỳ; không coi ảnh đáy mắt là thay thế khám mắt toàn diện."
-
-    if macular_status.startswith("center_involved") or macular_status.startswith("suspected_center"):
-        priority = max((priority, "urgent"), key=PRIORITY_ORDER.get)
-        actions.append("Bác sĩ nhãn khoa đánh giá hoàng điểm và OCT; không tự động chỉ định tiêm/laser.")
-    elif "requires_macular_assessment" in macular_status:
-        priority = max((priority, "prompt"), key=PRIORITY_ORDER.get)
-        actions.append("Đo thị lực và đánh giá hoàng điểm/OCT nếu có chỉ định.")
 
     if grading.confidence < LOW_CONFIDENCE_THRESHOLD:
         priority = max((priority, "prompt"), key=PRIORITY_ORDER.get)
@@ -110,7 +77,7 @@ def _clinical_rule(eye: str, grading, segmentation, context: ClinicalContext):
         actions.append("HbA1c trên 8% được gắn cờ vận hành; mục tiêu điều trị phải cá thể hóa, không cộng điểm nguy cơ.")
 
     actions.append("Kiểm soát đái tháo đường theo bác sĩ điều trị; không dùng risk score tự đặt.")
-    return priority, follow_up, referral, macular_status, findings, actions, safety_flags
+    return priority, follow_up, referral, findings, actions, safety_flags
 
 
 class ClinicalAnalysisModule:
@@ -140,10 +107,9 @@ class ClinicalAnalysisModule:
             review_priority=rule[0],
             follow_up_window=rule[1],
             referral=rule[2],
-            macular_status=rule[3],
-            findings=rule[4],
-            actions=rule[5],
-            safety_flags=rule[6],
+            findings=rule[3],
+            actions=rule[4],
+            safety_flags=rule[5],
         )
 
     async def analyze(

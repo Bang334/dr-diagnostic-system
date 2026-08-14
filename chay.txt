@@ -1,0 +1,11 @@
+CÁCH CHẠY PROJECT (mở 2 cửa sổ PowerShell)
+
+Terminal 1 - Backend:
+cd E:\HocTap\DoAnTT\dr-diagnostic-system\backend
+.\.venv\Scripts\python.exe -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+Terminal 2 - Frontend:
+cd E:\HocTap\DoAnTT\dr-diagnostic-system\frontend
+npm run dev
+
+Sau đó mở: http://localhost:5173

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+import httpx
 
 from app.clinical.models import (
     ClinicalContext,
     EyeClinicalAssessment,
     GradingResult,
     ImageQuality,
+    PriorEyeFinding,
+    PriorScreening,
     ScreeningAssessment,
     SegmentationResult,
 )
@@ -34,7 +40,6 @@ def assessment() -> ScreeningAssessment:
             review_priority="prompt",
             follow_up_window="3–6 tháng",
             referral="Bác sĩ xác nhận.",
-            macular_status="not_assessed",
             findings=[],
             actions=["Bác sĩ xác nhận kết quả."],
             safety_flags=[],
@@ -67,6 +72,38 @@ class ClinicalSummaryTests(unittest.TestCase):
         self.assertNotIn("macular_status", serialized)
         self.assertEqual(payload["patient"]["hba1c_percent"], 6.5)
 
+    def test_outbound_payload_includes_at_most_two_prior_screenings(self):
+        prior_screenings = [
+            PriorScreening(
+                screening_date=datetime(2026, month, 1, tzinfo=timezone.utc),
+                eyes=[
+                    PriorEyeFinding(
+                        eye="L",
+                        dr_grade=grade,
+                        dr_label=f"Grade {grade}",
+                        confidence=0.8,
+                        detected_lesions=["MA"],
+                    )
+                ],
+            )
+            for month, grade in ((7, 2), (5, 1), (3, 0))
+        ]
+        payload = _safe_clinical_payload(
+            ClinicalContext(patient_code="BN-SECRET", prior_screenings=prior_screenings),
+            assessment(),
+        )
+
+        self.assertEqual(len(payload["prior_screenings"]), 2)
+        self.assertEqual(payload["prior_screenings"][0]["eyes"][0]["dr_grade"], 2)
+        self.assertNotIn("BN-SECRET", str(payload))
+
+        summary = build_rule_summary(
+            ClinicalContext(prior_screenings=prior_screenings),
+            assessment(),
+        )
+        self.assertTrue(any("2026-07-01" in item for item in summary.diabetes_evidence))
+        self.assertIn("suy luận gián tiếp", summary.diabetes_assessment)
+
     def test_missing_key_returns_safe_local_draft(self):
         result = asyncio.run(
             GeminiClinicalSummaryAdapter(api_key="").generate(
@@ -83,6 +120,26 @@ class ClinicalSummaryTests(unittest.TestCase):
         self.assertIn("HbA1c gần nhất là 6.5%", result.diabetes_assessment)
         self.assertIn("Grade 2", result.diabetes_assessment)
         self.assertTrue(any("Grade 2" in item for item in result.diabetes_evidence))
+
+    def test_invalid_proxy_url_returns_safe_local_draft(self):
+        with patch(
+            "app.clinical.summary.httpx.AsyncClient",
+            side_effect=httpx.InvalidURL("Invalid port: ':1'"),
+        ) as async_client:
+            result = asyncio.run(
+                GeminiClinicalSummaryAdapter(api_key="configured-key").generate(
+                    ClinicalContext(
+                        diabetes_type="Type 2",
+                        diabetes_duration_years=4,
+                        hba1c=6.5,
+                    ),
+                    assessment(),
+                )
+            )
+
+        self.assertEqual(result.status, "fallback")
+        self.assertEqual(result.provider, "local-rules")
+        async_client.assert_called_once_with(timeout=45.0, trust_env=False)
 
     def test_hba1c_range_is_primary_and_grade_is_supporting_evidence(self):
         result = build_rule_summary(ClinicalContext(hba1c=6.7), assessment())
@@ -125,6 +182,10 @@ class ClinicalSummaryTests(unittest.TestCase):
         self.assertIn("diabetes_assessment_level đúng một trong các mã", prompt)
         self.assertIn("nguy cơ sàng lọc cao", prompt)
         self.assertIn("không tự suy đoán loại bệnh", prompt)
+        self.assertIn("1–2 lần khám trước", prompt)
+        self.assertIn("xét nghiệm xác nhận", prompt)
+        self.assertIn("nhận định xu hướng kiểm soát đường huyết ở mức gợi ý", prompt)
+        self.assertIn("đây là suy luận gián tiếp", prompt)
 
 
 if __name__ == "__main__":

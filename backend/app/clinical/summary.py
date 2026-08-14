@@ -86,6 +86,13 @@ def _safe_clinical_payload(
                 for eye in _assessed_eyes(assessment)
             ],
         },
+        "prior_screenings": [
+            {
+                "screening_date": prior.screening_date.isoformat(),
+                "eyes": [eye.model_dump(mode="json") for eye in prior.eyes],
+            }
+            for prior in context.prior_screenings[:2]
+        ],
     }
 
 
@@ -98,6 +105,29 @@ def _follow_up_text(assessment: ScreeningAssessment) -> str:
 
 def _eye_label(eye: str) -> str:
     return "Mắt trái" if eye == "L" else "Mắt phải"
+
+
+def _prior_screening_evidence(context: ClinicalContext) -> List[str]:
+    evidence: List[str] = []
+    for prior in context.prior_screenings[:2]:
+        eye_summaries: List[str] = []
+        for eye in prior.eyes:
+            lesion_text = (
+                f", tổn thương {', '.join(eye.detected_lesions)}"
+                if eye.detected_lesions
+                else ""
+            )
+            eye_summaries.append(
+                f"{_eye_label(eye.eye).lower()} Grade {eye.dr_grade} – "
+                f"{eye.dr_label}{lesion_text}"
+            )
+        if eye_summaries:
+            evidence.append(
+                f"Lần khám {prior.screening_date.date().isoformat()}: "
+                + "; ".join(eye_summaries)
+                + "."
+            )
+    return evidence
 
 
 def _diabetes_support(
@@ -213,6 +243,17 @@ def _diabetes_support(
             "Kết quả ảnh làm tăng bằng chứng về biến chứng võng mạc nhưng không thay thế xét nghiệm "
             "xác nhận và kết luận của bác sĩ."
         )
+
+    prior_evidence = _prior_screening_evidence(context)
+    evidence.extend(prior_evidence)
+    if prior_evidence:
+        statement += (
+            " Diễn tiến võng mạc được đối chiếu với 1–2 lần khám trước và có thể dùng để gợi ý xu hướng "
+            "kiểm soát đường huyết theo thời gian; đây là suy luận gián tiếp cần đối chiếu HbA1c hoặc glucose "
+            "nối tiếp vì huyết áp, lipid, thời gian mắc bệnh và điều trị mắt cũng có thể ảnh hưởng."
+        )
+    else:
+        statement += " Chưa có lần khám trước để đánh giá diễn tiến biến chứng võng mạc."
 
     return level, statement, evidence
 
@@ -351,21 +392,25 @@ class GeminiClinicalSummaryAdapter:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-3.1-flash-lite",
+        model: str = "gemini-3.6-flash",
         timeout_seconds: float = 45,
-        temperature: float = 0.2,
-        max_output_tokens: int = 4096,
+        max_output_tokens: int = 16384,
     ):
         self.api_key = api_key.strip()
-        self.model = model.strip() or "gemini-3.1-flash-lite"
+        self.model = model.strip() or "gemini-3.6-flash"
         self.timeout_seconds = timeout_seconds
-        self.temperature = temperature
         self.max_output_tokens = max_output_tokens
 
     @staticmethod
     def _prompt(payload: Dict[str, Any]) -> str:
         return (
-            "Bạn là trợ lý soạn thảo báo cáo sàng lọc bệnh võng mạc đái tháo đường. "
+            "Bạn là trợ lý soạn thảo báo cáo hỗ trợ đánh giá đái tháo đường và biến chứng võng mạc. "
+            "Mục tiêu trung tâm là đánh giá hỗ trợ chẩn đoán tình trạng đái tháo đường từ tiền sử, "
+            "loại đái tháo đường đã ghi nhận, thời gian mắc bệnh, HbA1c và dữ liệu lâm sàng được cung cấp. "
+            "Nếu chưa có tiền sử mà HbA1c >= 6.5%, phải nêu rằng kết quả đạt ngưỡng xét nghiệm gợi ý "
+            "đái tháo đường nhưng cần xét nghiệm xác nhận khi không có tăng đường huyết rõ ràng; không được "
+            "tự ghi là đã chẩn đoán xác định. HbA1c 5.7–6.4% phải được mô tả là khoảng tiền đái tháo đường. "
+            "HbA1c < 5.7% không được dùng để loại trừ bệnh nếu dữ liệu khác không thống nhất. "
             "Hãy đánh giá tình trạng đái tháo đường chủ yếu từ tiền sử, loại đái tháo đường, HbA1c và "
             "dữ liệu lâm sàng được cung cấp. Dùng DR Grade và tổn thương MA/HE/EX làm bằng chứng bổ sung "
             "về biến chứng võng mạc, không dùng chúng độc lập để xác nhận hoặc loại trừ đái tháo đường. "
@@ -385,8 +430,16 @@ class GeminiClinicalSummaryAdapter:
             "Trường diabetes_assessment phải là một đoạn văn liền mạch kết hợp tiền sử, thời gian mắc bệnh, "
             "HbA1c, DR Grade và tổn thương được phát hiện; không trình bày các nguồn này thành những kết luận "
             "rời rạc và không được nói DR Grade thuộc ngưỡng chẩn đoán đái tháo đường. "
+            "Nếu prior_screenings có dữ liệu, bắt buộc so sánh lần hiện tại với 1–2 lần khám trước theo ngày, "
+            "từng mắt, DR Grade và tổn thương để mô tả ổn định, tiến triển hoặc cải thiện. Nếu không có lịch sử, "
+            "phải nói rõ chưa đủ dữ liệu đánh giá xu hướng. Được đưa ra nhận định xu hướng kiểm soát đường huyết ở mức "
+            "gợi ý: DR tiến triển có thể phù hợp với phơi nhiễm tăng đường huyết kéo dài hoặc kiểm soát chưa tối ưu; "
+            "DR ổn định/cải thiện có thể phù hợp với kiểm soát tốt hơn. Luôn ghi rõ đây là suy luận gián tiếp, không phải "
+            "đo đường huyết; cần đối chiếu HbA1c/glucose nối tiếp và các yếu tố gây nhiễu như huyết áp, lipid, thời gian "
+            "mắc bệnh, điều trị võng mạc hoặc cải thiện đường huyết nhanh. Đưa nhận xét dọc thời gian vào diabetes_assessment, "
+            "diabetes_evidence và key_findings. "
             "Chỉ tổng hợp dữ liệu JSON được cung cấp; không tự đổi grade, confidence, mức ưu tiên, "
-            "không chẩn đoán DME khi chưa có OCT, không kê đơn và không khẳng định thay bác sĩ. "
+            "không kê đơn, không tự chỉ định điều trị và không khẳng định thay bác sĩ. "
             "Viết tiếng Việt ngắn gọn, dễ duyệt. Trả về đúng một JSON object gồm các khóa: "
             "overview (string), diabetes_assessment_level (string), diabetes_assessment (string), "
             "diabetes_evidence (array string), diagnostic_impression (string), diagnostic_basis (array string), "
@@ -416,12 +469,14 @@ class GeminiClinicalSummaryAdapter:
             "contents": [{"parts": [{"text": self._prompt(_safe_clinical_payload(context, assessment))}]}],
             "generationConfig": {
                 "maxOutputTokens": self.max_output_tokens,
-                "temperature": self.temperature,
                 "responseMimeType": "application/json",
             },
         }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                trust_env=False,
+            ) as client:
                 response = await client.post(
                     url,
                     headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
@@ -441,6 +496,14 @@ class GeminiClinicalSummaryAdapter:
                 model=self.model,
                 **generated,
             )
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, ValidationError):
+        except (
+            httpx.HTTPError,
+            httpx.InvalidURL,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ):
             # A report-writing outage must not discard a valid local DR analysis.
             return _fallback_summary(context, assessment, self.model)

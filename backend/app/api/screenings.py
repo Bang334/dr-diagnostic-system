@@ -18,7 +18,12 @@ from app.clinical.adapters import (
     UnavailableSegmentationAdapter,
 )
 from app.clinical.analysis import ClinicalAnalysisModule, InvalidFundusSet
-from app.clinical.models import ClinicalContext, EyeImageSet
+from app.clinical.models import (
+    ClinicalContext,
+    EyeImageSet,
+    PriorEyeFinding,
+    PriorScreening,
+)
 from app.clinical.quality import sanitize_fundus_image
 from app.clinical.summary import GeminiClinicalSummaryAdapter, build_rule_summary
 from app.core.config import settings
@@ -117,6 +122,51 @@ def build_image_storage() -> CloudinaryImageStorage:
     )
 
 
+def _load_prior_screenings(
+    db: Session,
+    patient_id: int,
+    limit: int = 2,
+) -> list[PriorScreening]:
+    screenings = (
+        db.query(Screening)
+        .filter(Screening.patient_id == patient_id)
+        .order_by(Screening.screening_date.desc())
+        .limit(limit)
+        .all()
+    )
+    history: list[PriorScreening] = []
+    for screening in screenings:
+        if screening.screening_date is None:
+            continue
+        segmentation_by_eye = {
+            result.eye: result for result in screening.segmentation_results
+        }
+        eyes: list[PriorEyeFinding] = []
+        for result in sorted(screening.ai_results, key=lambda item: item.eye):
+            segmentation = segmentation_by_eye.get(result.eye)
+            detected_lesions: list[str] = []
+            if segmentation:
+                if segmentation.microaneurysm_detected:
+                    detected_lesions.append("Vi phình mạch (MA)")
+                if segmentation.hemorrhage_detected:
+                    detected_lesions.append("Xuất huyết (HE)")
+                if segmentation.hard_exudate_detected:
+                    detected_lesions.append("Tiết cứng (EX)")
+            eyes.append(
+                PriorEyeFinding(
+                    eye=result.eye,
+                    dr_grade=result.dr_grade,
+                    dr_label=DR_LABELS[result.dr_grade],
+                    confidence=float(result.confidence),
+                    detected_lesions=detected_lesions,
+                )
+            )
+        history.append(
+            PriorScreening(screening_date=screening.screening_date, eyes=eyes)
+        )
+    return history
+
+
 async def _cleanup_uploaded_images(
     storage: CloudinaryImageStorage,
     images: list[StoredImage],
@@ -147,7 +197,6 @@ def _eye_response(assessment: dict, image_url: str) -> dict:
         "review_priority": assessment["review_priority"],
         "follow_up_window": assessment["follow_up_window"],
         "referral": assessment["referral"],
-        "macular_status": assessment["macular_status"],
         "findings": assessment["findings"],
         "actions": assessment["actions"],
         "safety_flags": assessment["safety_flags"],
@@ -273,6 +322,7 @@ async def upload_screening(
         diabetes_type=patient.diabetes_type,
         diabetes_duration_years=float(patient.diabetes_duration_years) if patient.diabetes_duration_years is not None else None,
         hba1c=float(patient.latest_hba1c) if patient.latest_hba1c is not None else None,
+        prior_screenings=_load_prior_screenings(db, patient.id),
     )
 
     try:
@@ -328,7 +378,6 @@ async def upload_screening(
         api_key=settings.GEMINI_API_KEY,
         model=settings.GEMINI_MODEL,
         timeout_seconds=settings.GEMINI_TIMEOUT_SECONDS,
-        temperature=settings.GEMINI_TEMPERATURE,
         max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
     ).generate(context, result)
     rule_summary = build_rule_summary(context, result)

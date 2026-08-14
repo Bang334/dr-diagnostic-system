@@ -142,8 +142,6 @@ Clinical Analysis Module tổng hợp dữ liệu thành dự thảo:
 - **Không tính risk score y khoa tự đặt.** Chỉ có `review_priority` để sắp hàng đợi.
 - **Mốc tham khảo:** Grade 3 chuyển chuyên khoa và đánh giá không quá 3 tháng;
   Grade 4 chuyển tuyến tỉnh/trung ương dưới 1 tháng. Grade 0–2 do bác sĩ cá thể hóa.
-- **Hoàng điểm:** hard exudate chỉ kích hoạt đánh giá hoàng điểm; không kết luận
-  DME hoặc chỉ định anti-VEGF/laser nếu thiếu vị trí dày võng mạc/OCT.
 - Giảm thị lực đột ngột được chuyển khám trong ngày, không chờ AI; thị lực dưới
   5/10 được chuyển chuyên khoa kể cả ảnh không thấy DR.
 - **Sinh báo cáo:** Tạo báo cáo tóm tắt Markdown và xuất PDF nhúng kèm ảnh võng mạc minh chứng.

@@ -9,7 +9,7 @@ Hệ thống hỗ trợ sàng lọc bệnh võng mạc đái tháo đường (Di
 - bác sĩ xác nhận hoặc điều chỉnh kết quả AI;
 - lập lịch tái khám và cung cấp cổng thông tin cho bệnh nhân.
 
-> **Giới hạn sử dụng:** Đây là hệ thống hỗ trợ sàng lọc và soạn thảo kết quả, không phải thiết bị tự chẩn đoán. Kết quả AI không thay thế khám mắt giãn đồng tử, OCT, xét nghiệm chẩn đoán đái tháo đường hoặc kết luận của bác sĩ nhãn khoa.
+> **Giới hạn sử dụng:** Đây là hệ thống hỗ trợ sàng lọc và soạn thảo kết quả, không phải thiết bị tự chẩn đoán. Kết quả AI không thay thế khám mắt toàn diện, xét nghiệm chẩn đoán đái tháo đường hoặc kết luận của bác sĩ nhãn khoa.
 
 ## Mục lục
 
@@ -106,7 +106,6 @@ flowchart LR
    - khoảng theo dõi tham khảo;
    - gợi ý chuyển chuyên khoa;
    - cờ an toàn;
-   - đánh giá giới hạn liên quan hoàng điểm.
 7. Nếu có `GEMINI_API_KEY`, Gemini soạn bản tóm tắt từ payload đã loại bỏ tên, mã bệnh nhân và thông tin liên hệ. Nếu Gemini lỗi hoặc không được cấu hình, hệ thống dùng tóm tắt luật cục bộ.
 8. Ảnh fundus đã làm sạch được tải lên Cloudinary. Database chỉ lưu URL HTTPS.
 9. Backend lưu lần khám, kết quả grading và kết quả segmentation vào PostgreSQL.
@@ -146,7 +145,6 @@ Pipeline thực hiện ROI crop, chuẩn hóa màu, green-channel CLAHE, suy lu�
 
 - Confidence dưới `0.70` gắn cờ `low_ai_confidence`.
 - Grade 3 và 4 luôn yêu cầu bác sĩ/chuyên khoa xác nhận.
-- Hard exudate chỉ kích hoạt yêu cầu đánh giá hoàng điểm/OCT; không tự kết luận DME.
 - HbA1c trên 8% chỉ là cờ vận hành, không phải điểm nguy cơ và không tự đổi điều trị.
 - `review_priority` dùng để sắp hàng đợi rà soát, không phải risk score y khoa.
 - Hệ thống không tự kê đơn, chỉ định laser, anti-VEGF hoặc phẫu thuật.
@@ -446,10 +444,9 @@ Backend đọc `backend/.env`.
 | Biến | Mặc định | Ý nghĩa |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | rỗng | API key chỉ đặt ở backend |
-| `GEMINI_MODEL` | `gemini-3.1-flash-lite` | Model soạn bản tóm tắt |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Model soạn bản tóm tắt |
 | `GEMINI_TIMEOUT_SECONDS` | `45` | Timeout request |
-| `GEMINI_TEMPERATURE` | `0.2` | Temperature |
-| `GEMINI_MAX_OUTPUT_TOKENS` | `4096` | Giới hạn output |
+| `GEMINI_MAX_OUTPUT_TOKENS` | `16384` | Giới hạn output |
 
 Không dùng tiền tố `VITE_` cho Gemini key. Payload gửi đi chỉ chứa tuổi, giới tính, bối cảnh đái tháo đường và kết quả sàng lọc; không gửi tên, mã bệnh nhân hoặc thông tin liên hệ.
 

@@ -65,10 +65,9 @@ class Settings:
     # Gemini writes a de-identified clinical draft after local image analysis.
     # The key must remain server-side and must never use a VITE_ prefix.
     GEMINI_API_KEY: str = _first_env("GEMINI_API_KEY", "GEMINI_API_KEYS")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     GEMINI_TIMEOUT_SECONDS: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", 45))
-    GEMINI_TEMPERATURE: float = float(os.getenv("GEMINI_TEMPERATURE", 0.2))
-    GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", 4096))
+    GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", 16384))
 
     # Cloud storage for sanitized fundus images. Credentials stay server-side.
     CLOUDINARY_CLOUD_NAME: str = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()

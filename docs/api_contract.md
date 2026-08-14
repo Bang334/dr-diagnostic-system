@@ -28,7 +28,7 @@ Kết quả thành công có `left_eye` và/hoặc `right_eye` tương ứng ả
 - `quality`: kết quả kỹ thuật của ảnh fundus; luôn cần human review.
 - `ai_result`: grade, confidence, probabilities, model version.
 - `segmentation`: lesion list, mask URL và model version.
-- `review_priority`, `follow_up_window`, `referral`, `macular_status`.
+- `review_priority`, `follow_up_window`, `referral`.
 - `findings`, `actions`, `safety_flags`.
 
 Toàn bộ phiên có `clinical_summary` do Gemini hoặc quy tắc dự phòng soạn từ dữ

@@ -51,7 +51,6 @@ def clinical_report_pdf(patient: Dict[str, Any], assessment: Dict[str, Any]) -> 
         pdf.ln(3)
         line(label, 12, 6)
         line(f"Phân loại AI: Grade {grading['dr_grade']} – {grading['dr_label']} ({grading['confidence']:.1%})")
-        line(f"Đánh giá hoàng điểm: {eye['macular_status']}")
         line(f"Khoảng theo dõi tham khảo: {eye['follow_up_window']}")
         line(f"Chuyển tuyến: {eye['referral']}")
         line("Tổn thương do model phân đoạn ghi nhận:")

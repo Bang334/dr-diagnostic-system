@@ -30,6 +30,8 @@ class ScreeningDetailContractTests(unittest.TestCase):
         eye_properties = schemas["ScreeningEyeDetail"]["properties"]
         self.assertIn("ai_result", eye_properties)
         self.assertIn("doctor_review", eye_properties)
+        upload_eye_properties = schemas["EyeAnalysisResponse"]["properties"]
+        self.assertNotIn("macular_status", upload_eye_properties)
         detail_properties = schemas["ScreeningDetailResponse"]["properties"]
         self.assertIn("results_visible", detail_properties)
         self.assertIn("diabetes_type", detail_properties)

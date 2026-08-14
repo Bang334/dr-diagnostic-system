@@ -375,7 +375,6 @@ export default function ClinicScreeningPage({ initialPatient, onClearPatient }) 
                       <span className="badge" style={{ backgroundColor: colors.drGrades[grade].color, color: '#fff' }}>{Math.round(eye.ai_result.confidence * 100)}%</span>
                     </div>
                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Ưu tiên rà soát: <strong>{eye.review_priority === 'prompt' ? 'Cao (Cần rà soát sớm)' : eye.review_priority}</strong> · Hẹn: <strong>{eye.follow_up_window}</strong></div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Hoàng điểm: <strong>{eye.macular_status === 'indeterminate_requires_macular_assessment' ? 'Nghi ngờ Phù Hoàng Điểm (Cần kiểm tra kỹ)' : eye.macular_status}</strong></div>
                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{eye.referral}</div>
 
                     {/* Image Preview & AI Overlay Toggle */}
@@ -707,7 +706,9 @@ export default function ClinicScreeningPage({ initialPatient, onClearPatient }) 
               {/* Doctor Review Section */}
               {currentScreeningDetail && canReviewScreening && currentScreeningDetail.status === 'AI_Analyzed' && (
                 <DoctorReviewForm
+                  key={currentScreeningDetail.id}
                   detail={currentScreeningDetail}
+                  suggestedFollowUp={selectedClinicalSummary?.follow_up || ''}
                   onSubmit={submitCurrentScreeningReview}
                 />
               )}

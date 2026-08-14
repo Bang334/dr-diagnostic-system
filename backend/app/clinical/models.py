@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,19 @@ class EyeImageSet:
     fundus_image: bytes
 
 
+class PriorEyeFinding(BaseModel):
+    eye: str
+    dr_grade: int = Field(ge=0, le=4)
+    dr_label: str
+    confidence: float = Field(ge=0, le=1)
+    detected_lesions: List[str] = Field(default_factory=list)
+
+
+class PriorScreening(BaseModel):
+    screening_date: datetime
+    eyes: List[PriorEyeFinding] = Field(default_factory=list)
+
+
 class ClinicalContext(BaseModel):
     patient_code: Optional[str] = None
     age_years: Optional[int] = Field(default=None, ge=0, le=130)
@@ -30,6 +44,7 @@ class ClinicalContext(BaseModel):
     diabetes_type: Optional[str] = None
     diabetes_duration_years: Optional[float] = Field(default=None, ge=0)
     hba1c: Optional[float] = Field(default=None, ge=0, le=20)
+    prior_screenings: List[PriorScreening] = Field(default_factory=list)
 
 
 class ImageQuality(BaseModel):
@@ -57,8 +72,6 @@ class Lesion(BaseModel):
     detected: bool = False
     area_pct: float = Field(default=0, ge=0)
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
-    # Optional spatial evidence. Area alone must never be used to diagnose DME.
-    distance_to_fovea_mm: Optional[float] = Field(default=None, ge=0)
 
 
 class SegmentationResult(BaseModel):
@@ -68,8 +81,6 @@ class SegmentationResult(BaseModel):
     lesion_mask_url: Optional[str] = None
     model_version: str
     status: str = "ok"
-    retinal_thickening_confirmed: Optional[bool] = None
-    center_involved_confirmed_by_oct: Optional[bool] = None
 
 
 class EyeClinicalAssessment(BaseModel):
@@ -80,7 +91,6 @@ class EyeClinicalAssessment(BaseModel):
     review_priority: str
     follow_up_window: str
     referral: str
-    macular_status: str
     findings: List[str]
     actions: List[str]
     safety_flags: List[str]

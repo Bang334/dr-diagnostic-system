@@ -12,7 +12,6 @@ bác sĩ/chuyên khoa mắt xác nhận.
 | Thị lực < 5/10 | QĐ 2558/QĐ-BYT | Chuyển chuyên khoa kể cả ảnh không phát hiện DR. |
 | Grade 3 | QĐ 2558/QĐ-BYT | Chuyển chuyên khoa, đánh giá không quá 3 tháng và sớm hơn theo bệnh cảnh. |
 | Grade 4 | QĐ 2558/QĐ-BYT | Chuyển tuyến tỉnh/trung ương dưới 1 tháng. |
-| Hard exudate | Internal safety trigger | Chỉ yêu cầu đánh giá hoàng điểm/OCT; không kết luận DME. |
 | Confidence < 0,70 | Operational heuristic | Tăng ưu tiên bác sĩ đọc/chụp lại; không phải ngưỡng y khoa. |
 | `review_priority` | Internal workflow | Sắp hàng đợi, không trình bày như risk score lâm sàng. |
 | HbA1c > 8%, BP ≥ 140/90 | Operational flags | Nhắc bác sĩ đánh giá và cá thể hóa; không cộng điểm hoặc tự đổi điều trị. |
@@ -20,7 +19,6 @@ bác sĩ/chuyên khoa mắt xác nhận.
 
 ## Rule đã loại bỏ
 
-- `hard_exudate.area_pct >= 0.1` suy ra DME/center-involved DME.
 - `hemorrhage.area_pct >= 0.5` suy ra high-risk PDR hoặc mốc 24–48 giờ.
 - Risk score 0–100 từ trọng số lesion, HbA1c, huyết áp và thời gian mắc bệnh.
 - Tự gắn chất lượng ảnh `Good` chỉ từ định dạng/kích thước file.

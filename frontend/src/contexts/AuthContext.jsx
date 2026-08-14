@@ -33,8 +33,11 @@ export function AuthProvider({ children }) {
     setAuthError('');
     try {
       const res = await api.login(username, password);
-      localStorage.setItem('token', res.access_token);
-      setToken(res.access_token);
+      if (!res.token) {
+        throw new Error('Login response did not include an authentication token.');
+      }
+      localStorage.setItem('token', res.token);
+      setToken(res.token);
       const user = await api.getCurrentUser();
       setCurrentUser(user);
       return { success: true, user };
