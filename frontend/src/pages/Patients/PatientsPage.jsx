@@ -3,6 +3,7 @@ import { QrCode, Plus, Search } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppDialog } from '../../components/AppDialogProvider';
+import { resolvePatientFromQr } from './patientQrLookup';
 
 // Modals
 import QRScannerModal from '../../components/QRScannerModal';
@@ -50,10 +51,28 @@ export default function PatientsPage({ onStartScreening }) {
     }
   };
 
-  const handleQRScanSuccess = (patient) => {
+  const handleQRScanSuccess = async (decodedText) => {
     setIsScannerOpen(false);
-    setSelectedPatientDetails(patient);
-    setIsDetailsOpen(true);
+
+    try {
+      const patient = await resolvePatientFromQr(decodedText, api.getPatients);
+      if (!patient) {
+        dialog.showError(
+          'Không tìm thấy hồ sơ khớp với mã QR vừa quét.',
+          'Không tìm thấy bệnh nhân',
+        );
+        return;
+      }
+
+      setSelectedPatientDetails(patient);
+      setIsDetailsOpen(true);
+    } catch (err) {
+      console.error('Error resolving patient QR code:', err);
+      dialog.showError(
+        'Không thể tra cứu hồ sơ bệnh nhân. Vui lòng thử lại.',
+        'Lỗi quét mã QR',
+      );
+    }
   };
 
   const canReview = currentUser?.role === 'admin'
