@@ -1,2 +1,0 @@
-# Keep this directory in git
-# Large model weights should be placed here locally but are excluded from git by .gitignore
