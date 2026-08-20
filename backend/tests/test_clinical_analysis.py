@@ -14,7 +14,7 @@ from app.clinical.models import (
     Lesion,
     SegmentationResult,
 )
-from app.clinical.report import clinical_report_pdf
+from app.clinical.report import clinical_report_pdf, screening_report_pdf
 
 
 def valid_fundus_bytes() -> bytes:
@@ -142,6 +142,43 @@ class ClinicalAnalysisTests(unittest.TestCase):
         result = self.analyze(ClinicalAnalysisModule(FakeGradingAdapter(), FakeSegmentationAdapter()))
         payload = result.model_dump(mode="json")
         pdf = clinical_report_pdf({"patient_code": "BN01", "full_name": "Nguyễn Văn A"}, payload)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+
+    def test_stored_screening_pdf_contains_valid_pdf_header(self):
+        pdf = screening_report_pdf({
+            "screening_id": 22,
+            "screening_date": "2026-08-20T18:25:35+07:00",
+            "status": "Reviewed",
+            "patient": {"patient_code": "BN01", "full_name": "Nguyễn Văn A"},
+            "doctor_name": "Bác sĩ Nguyễn",
+            "eyes": [{
+                "eye": "L",
+                "ai_result": {
+                    "dr_grade": 2,
+                    "dr_label": "DR không tăng sinh trung bình",
+                    "confidence": 0.91,
+                    "model_version": "grading-v1",
+                },
+                "doctor_review": {
+                    "final_dr_grade": 2,
+                    "final_dr_label": "DR không tăng sinh trung bình",
+                    "is_agree_with_ai": True,
+                    "clinical_notes": "Theo dõi định kỳ.",
+                },
+                "lesions": [{
+                    "label": "Vi phình mạch (MA)",
+                    "detected": True,
+                    "area_pct": 0.12,
+                }],
+            }],
+            "recall": {
+                "recall_date": "2027-02-20",
+                "risk_stratification": "Medium",
+                "recommendation": "Tái khám sau 6 tháng.",
+                "status": "Scheduled",
+            },
+        })
+
         self.assertTrue(pdf.startswith(b"%PDF"))
 
 

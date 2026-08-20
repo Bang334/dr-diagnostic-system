@@ -120,6 +120,18 @@ export const api = {
     return response.json();
   },
 
+  downloadScreeningReport: async (screeningId) => {
+    const response = await fetch(`${API_BASE_URL}/screenings/${screeningId}/report.pdf`, {
+      method: 'GET',
+      headers: getHeaders(),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Không thể tải báo cáo PDF.');
+    }
+    return response.blob();
+  },
+
   reviewScreening: async (screeningId, reviewData) => {
     const response = await fetch(`${API_BASE_URL}/reviews/${screeningId}`, {
       method: 'POST',

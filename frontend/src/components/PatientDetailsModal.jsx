@@ -280,12 +280,7 @@ export default function PatientDetailsModal({ isOpen, onClose, patient, onStartS
                   const handleDownloadPDF = async (e, screeningId) => {
                     e.stopPropagation();
                     try {
-                      const token = localStorage.getItem('token');
-                      const response = await fetch(`/api/v1/screenings/${screeningId}/report.pdf`, {
-                        headers: token ? { 'Authorization': token } : {}
-                      });
-                      if (!response.ok) throw new Error('Không thể tải xuống PDF');
-                      const blob = await response.blob();
+                      const blob = await api.downloadScreeningReport(screeningId);
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
@@ -294,7 +289,9 @@ export default function PatientDetailsModal({ isOpen, onClose, patient, onStartS
                       a.click();
                       document.body.removeChild(a);
                       URL.revokeObjectURL(url);
-                    } catch (err) { alert('Có lỗi khi tải PDF.'); }
+                    } catch (err) {
+                      dialog.showError(err.message, 'Lỗi tải báo cáo PDF');
+                    }
                   };
                   return (
                     <div key={s.id} className="card" style={{

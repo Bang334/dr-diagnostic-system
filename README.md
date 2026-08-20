@@ -162,7 +162,7 @@ Pipeline thực hiện ROI crop, chuẩn hóa màu, green-channel CLAHE, suy lu�
 | Xử lý ảnh | Pillow, OpenCV, NumPy |
 | Tóm tắt hồ sơ | Gemini REST API qua HTTPX, có local-rule fallback |
 | Lưu ảnh | Cloudinary |
-| Báo cáo | fpdf2 - mới có module dựng PDF, chưa có endpoint hoàn chỉnh |
+| Báo cáo | fpdf2, xuất PDF từ dữ liệu lần khám đã lưu qua API có xác thực |
 | Web production | Nginx, Docker multi-stage build |
 | Kiểm thử | pytest |
 
@@ -503,6 +503,7 @@ Base URL: `/api/v1`.
 | `POST` | `/screenings/upload` | Staff | Upload và phân tích ảnh |
 | `GET` | `/screenings/patient/{id}` | Staff | Lịch sử sàng lọc của bệnh nhân |
 | `GET` | `/screenings/{id}` | Chủ hồ sơ hoặc staff | Chi tiết lần khám |
+| `GET` | `/screenings/{id}/report.pdf` | Chủ hồ sơ hoặc staff | Tải báo cáo PDF; bệnh nhân chỉ tải được sau khi bác sĩ duyệt |
 | `POST` | `/reviews/{screening_id}` | Admin/bác sĩ nhãn khoa | Xác nhận kết quả và lịch tái khám |
 | `GET` | `/patient-portal/overview` | Patient | Tổng quan portal |
 | `GET` | `/reports/epidemiology` | Staff | Thống kê theo tuổi, thời gian bệnh, grade và mức đồng thuận |
@@ -675,8 +676,6 @@ Trước khi triển khai container đầy đủ cần:
 - Quy trình mục tiêu hai trường ảnh cho mỗi mắt chưa được hỗ trợ; API chỉ nhận tối đa một ảnh/mắt.
 - Không có Alembic/migration runner và không tự tạo schema khi startup.
 - `docker-compose.yml` còn tham chiếu bố cục database cũ.
-- Module dựng PDF đã có trong `backend/app/clinical/report.py`, nhưng chưa có API tải PDF hoạt động.
-- Frontend cũ còn nút tải PDF và một lời gọi `getScreeningById` chưa khớp với API client; không nên xem đây là chức năng hoàn chỉnh.
 - Test AI grading hiện tham chiếu `ai/grading/benchmark_backbones.py`, nhưng file này không có trong cây nguồn hiện tại; cần khôi phục hoặc cập nhật test trước khi toàn bộ AI test suite có thể collect thành công.
 - Clinical summary chỉ trả trong response upload, chưa được lưu như snapshot riêng trong database.
 - Báo cáo dịch tễ dùng kết luận bác sĩ đã duyệt, không dùng trực tiếp grade AI.

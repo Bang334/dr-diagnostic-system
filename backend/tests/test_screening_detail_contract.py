@@ -1,9 +1,15 @@
 import unittest
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from fastapi import HTTPException
 from main import app
-from app.api.screenings import _require_screening_detail_access, _screening_eye_detail
+from app.api.screenings import (
+    _require_screening_detail_access,
+    _screening_eye_detail,
+    download_screening_report,
+)
+from app.models.clinical import Recall, Screening
 
 
 class ScreeningDetailContractTests(unittest.TestCase):
@@ -37,6 +43,83 @@ class ScreeningDetailContractTests(unittest.TestCase):
         self.assertIn("diabetes_type", detail_properties)
         self.assertIn("diabetes_duration_years", detail_properties)
         self.assertIn("latest_hba1c", detail_properties)
+
+    def test_openapi_exposes_screening_pdf_download(self):
+        spec = app.openapi()
+        path = spec["paths"].get(
+            "/api/v1/screenings/{screening_id}/report.pdf"
+        )
+
+        self.assertIsNotNone(path)
+        response = path["get"]["responses"]["200"]
+        self.assertIn("application/pdf", response["content"])
+
+    def test_screening_pdf_download_returns_stored_results(self):
+        screening = SimpleNamespace(
+            id=22,
+            patient_id=7,
+            screening_date=datetime(2026, 8, 20, 18, 25, 35),
+            status="Reviewed",
+            patient=SimpleNamespace(patient_code="BN01", full_name="Nguyễn Văn A"),
+            doctor=SimpleNamespace(full_name="Bác sĩ Nguyễn"),
+            ai_results=[SimpleNamespace(
+                eye="L",
+                dr_grade=2,
+                confidence=0.91,
+                model_version="grading-v1",
+            )],
+            segmentation_results=[SimpleNamespace(
+                eye="L",
+                microaneurysm_detected=True,
+                microaneurysm_area_pct=0.12,
+                hemorrhage_detected=False,
+                hemorrhage_area_pct=0,
+                hard_exudate_detected=False,
+                hard_exudate_area_pct=0,
+            )],
+            reviews=[SimpleNamespace(
+                eye="L",
+                final_dr_grade=2,
+                is_agree_with_ai=True,
+                clinical_notes="Theo dõi định kỳ.",
+            )],
+        )
+        recall = SimpleNamespace(
+            recall_date=date(2027, 2, 20),
+            risk_stratification="Medium",
+            recommendation="Tái khám sau 6 tháng.",
+            status="Scheduled",
+        )
+
+        class FakeQuery:
+            def __init__(self, result):
+                self.result = result
+
+            def filter(self, *args):
+                return self
+
+            def order_by(self, *args):
+                return self
+
+            def first(self):
+                return self.result
+
+        class FakeDatabase:
+            def query(self, model):
+                return FakeQuery(screening if model is Screening else recall)
+
+        response = download_screening_report(
+            22,
+            db=FakeDatabase(),
+            current_account=SimpleNamespace(role="admin"),
+        )
+
+        self.assertEqual(response.media_type, "application/pdf")
+        self.assertTrue(response.body.startswith(b"%PDF"))
+        self.assertIn(
+            'filename="bao-cao-lan-kham-22.pdf"',
+            response.headers["content-disposition"],
+        )
 
     def test_patient_can_view_only_own_screening_at_any_status(self):
         account = SimpleNamespace(

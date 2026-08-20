@@ -6,6 +6,7 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -25,6 +26,7 @@ from app.clinical.models import (
     PriorScreening,
 )
 from app.clinical.quality import sanitize_fundus_image
+from app.clinical.report import screening_report_pdf
 from app.clinical.summary import GeminiClinicalSummaryAdapter, build_rule_summary
 from app.core.config import settings
 from app.core.database import get_db
@@ -281,6 +283,95 @@ def _require_screening_detail_access(
             raise HTTPException(status_code=404, detail="Không tìm thấy lần khám.")
     elif current_account.role not in {"admin", "doctor"}:
         raise HTTPException(status_code=403, detail="Không có quyền xem lần khám.")
+
+
+def _screening_report_payload(screening: Screening, recall: Optional[Recall]) -> dict:
+    ai_by_eye = {item.eye: item for item in screening.ai_results}
+    segmentation_by_eye = {item.eye: item for item in screening.segmentation_results}
+    review_by_eye = {item.eye: item for item in screening.reviews}
+    eyes = []
+
+    for eye in ("L", "R"):
+        ai_result = ai_by_eye.get(eye)
+        segmentation = segmentation_by_eye.get(eye)
+        doctor_review = review_by_eye.get(eye)
+        if not any((ai_result, segmentation, doctor_review)):
+            continue
+
+        lesions = []
+        if segmentation:
+            lesions = [
+                {
+                    "label": "Vi phình mạch (MA)",
+                    "detected": bool(segmentation.microaneurysm_detected),
+                    "area_pct": float(segmentation.microaneurysm_area_pct or 0),
+                },
+                {
+                    "label": "Xuất huyết (HE)",
+                    "detected": bool(segmentation.hemorrhage_detected),
+                    "area_pct": float(segmentation.hemorrhage_area_pct or 0),
+                },
+                {
+                    "label": "Tiết cứng (EX)",
+                    "detected": bool(segmentation.hard_exudate_detected),
+                    "area_pct": float(segmentation.hard_exudate_area_pct or 0),
+                },
+            ]
+
+        eyes.append({
+            "eye": eye,
+            "ai_result": (
+                {
+                    "dr_grade": ai_result.dr_grade,
+                    "dr_label": DR_LABELS[ai_result.dr_grade],
+                    "confidence": float(ai_result.confidence),
+                    "model_version": ai_result.model_version,
+                }
+                if ai_result
+                else None
+            ),
+            "doctor_review": (
+                {
+                    "final_dr_grade": doctor_review.final_dr_grade,
+                    "final_dr_label": DR_LABELS[doctor_review.final_dr_grade],
+                    "is_agree_with_ai": doctor_review.is_agree_with_ai,
+                    "clinical_notes": doctor_review.clinical_notes,
+                }
+                if doctor_review
+                else None
+            ),
+            "lesions": lesions,
+        })
+
+    return {
+        "screening_id": screening.id,
+        "screening_date": (
+            screening.screening_date.strftime("%d/%m/%Y %H:%M")
+            if screening.screening_date
+            else None
+        ),
+        "status": screening.status,
+        "patient": {
+            "patient_code": screening.patient.patient_code,
+            "full_name": screening.patient.full_name,
+        },
+        "doctor_name": screening.doctor.full_name if screening.doctor else None,
+        "eyes": eyes,
+        "recall": (
+            {
+                "recall_date": (
+                    recall.recall_date.strftime("%d/%m/%Y")
+                    if recall.recall_date
+                    else None
+                ),
+                "risk_stratification": recall.risk_stratification,
+                "recommendation": recall.recommendation,
+                "status": recall.status,
+            }
+            if recall
+            else None
+        ),
+    }
 
 
 @router.post("/upload", response_model=ScreeningUploadResponse, status_code=status.HTTP_201_CREATED)
@@ -573,3 +664,51 @@ def get_screening_detail(
             else None
         ),
     }
+
+
+@router.get(
+    "/{screening_id}/report.pdf",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {
+                "application/pdf": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+            "description": "Báo cáo PDF của lần khám.",
+        }
+    },
+)
+def download_screening_report(
+    screening_id: int,
+    db: Session = Depends(get_db),
+    current_account: Account = Depends(get_current_account),
+):
+    screening = db.query(Screening).filter(Screening.id == screening_id).first()
+    if not screening:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lần khám.")
+
+    _require_screening_detail_access(current_account, screening)
+    if current_account.role == "patient" and screening.status != "Reviewed":
+        raise HTTPException(
+            status_code=403,
+            detail="Báo cáo chỉ hiển thị sau khi bác sĩ xác nhận.",
+        )
+
+    recall = (
+        db.query(Recall)
+        .filter(Recall.screening_id == screening.id)
+        .order_by(Recall.created_at.desc())
+        .first()
+    )
+    pdf = screening_report_pdf(_screening_report_payload(screening, recall))
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="bao-cao-lan-kham-{screening.id}.pdf"'
+            )
+        },
+    )
